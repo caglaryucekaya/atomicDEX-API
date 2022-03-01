@@ -148,7 +148,7 @@ impl BackgroundProcessor {
     ///
     /// `persist_manager` is responsible for writing out the [`ChannelManager`] to disk, and/or
     /// uploading to one or more backup services. See [`ChannelManager::write`] for writing out a
-    /// [`ChannelManager`]. See [`FilesystemPersister::persist_manager`] for Rust-Lightning's
+    /// [`ChannelManager`]. See [`LightningPersister::persist_manager`] for Rust-Lightning's
     /// provided implementation.
     ///
     /// Typically, users should either implement [`ChannelManagerPersister`] to never return an
@@ -167,7 +167,7 @@ impl BackgroundProcessor {
     /// [`stop`]: Self::stop
     /// [`ChannelManager`]: lightning::ln::channelmanager::ChannelManager
     /// [`ChannelManager::write`]: lightning::ln::channelmanager::ChannelManager#impl-Writeable
-    /// [`FilesystemPersister::persist_manager`]: lightning_persister::FilesystemPersister::persist_manager
+    /// [`LightningPersister::persist_manager`]: lightning_persister::LightningPersister::persist_manager
     /// [`NetworkGraph`]: lightning::routing::network_graph::NetworkGraph
     pub fn start<
         Signer: 'static + Sign,
@@ -356,7 +356,7 @@ mod tests {
     use lightning::util::test_utils;
     use lightning_invoice::payment::{InvoicePayer, RetryAttempts};
     use lightning_invoice::utils::DefaultRouter;
-    use lightning_persister::FilesystemPersister;
+    use lightning_persister::LightningPersister;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -378,7 +378,7 @@ mod tests {
         Arc<test_utils::TestBroadcaster>,
         Arc<test_utils::TestFeeEstimator>,
         Arc<test_utils::TestLogger>,
-        Arc<FilesystemPersister>,
+        Arc<LightningPersister>,
     >;
 
     struct Node {
@@ -403,7 +403,7 @@ mod tests {
             >,
         >,
         chain_monitor: Arc<ChainMonitor>,
-        persister: Arc<FilesystemPersister>,
+        persister: Arc<LightningPersister>,
         tx_broadcaster: Arc<test_utils::TestBroadcaster>,
         network_graph: Arc<NetworkGraph>,
         logger: Arc<test_utils::TestLogger>,
@@ -442,7 +442,7 @@ mod tests {
             });
             let chain_source = Arc::new(test_utils::TestChainSource::new(Network::Testnet));
             let logger = Arc::new(test_utils::TestLogger::with_id(format!("node {}", i)));
-            let persister = Arc::new(FilesystemPersister::new(
+            let persister = Arc::new(LightningPersister::new(
                 PathBuf::from(format!("{}_persister_{}", persist_dir, i)),
                 None,
             ));

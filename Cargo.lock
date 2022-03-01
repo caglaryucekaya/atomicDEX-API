@@ -3007,6 +3007,8 @@ dependencies = [
  "async-trait",
  "bitcoin",
  "common",
+ "db_common",
+ "hex 0.4.3",
  "libc",
  "lightning",
  "parking_lot 0.11.1",

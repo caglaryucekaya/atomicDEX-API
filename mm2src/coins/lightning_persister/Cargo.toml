@@ -13,6 +13,8 @@ Utilities to manage Rust-Lightning channel data persistence and retrieval.
 async-trait = "0.1"
 bitcoin = "0.27.1"
 common = { path = "../../common" }
+db_common = { path = "../../db_common" }
+hex = "0.4.2"
 lightning = "0.0.104"
 libc = "0.2"
 parking_lot = { version = "0.11", features = ["nightly"] }

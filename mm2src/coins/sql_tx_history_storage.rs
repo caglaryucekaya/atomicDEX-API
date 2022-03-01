@@ -5,15 +5,13 @@ use async_trait::async_trait;
 use common::mm_error::prelude::*;
 use common::{async_blocking, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::types::Type;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, ToSql, NO_PARAMS};
+use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, NO_PARAMS};
 use db_common::sqlite::sql_builder::SqlBuilder;
-use db_common::sqlite::{offset_by_id, validate_table_name};
+use db_common::sqlite::{offset_by_id, query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
 use rpc::v1::types::Bytes as BytesJson;
 use serde_json::{self as json};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
-
-const CHECK_TABLE_EXISTS_SQL: &str = "SELECT name FROM sqlite_master WHERE type='table' AND name=?1;";
 
 fn tx_history_table(ticker: &str) -> String { ticker.to_owned() + "_tx_history" }
 
@@ -183,28 +181,6 @@ impl SqliteTxHistoryStorage {
 
 impl TxHistoryStorageError for SqlError {}
 
-fn query_single_row<T, P, F>(
-    conn: &Connection,
-    query: &str,
-    params: P,
-    map_fn: F,
-) -> Result<Option<T>, MmError<SqlError>>
-where
-    P: IntoIterator,
-    P::Item: ToSql,
-    F: FnOnce(&Row<'_>) -> Result<T, SqlError>,
-{
-    let maybe_result = conn.query_row(query, params, map_fn);
-    if let Err(SqlError::QueryReturnedNoRows) = maybe_result {
-        return Ok(None);
-    }
-
-    let result = maybe_result?;
-    Ok(Some(result))
-}
-
-fn string_from_row(row: &Row<'_>) -> Result<String, SqlError> { row.get(0) }
-
 fn tx_details_from_row(row: &Row<'_>) -> Result<TransactionDetails, SqlError> {
     let json_string: String = row.get(0)?;
     json::from_str(&json_string).map_err(|e| SqlError::FromSqlConversionFailure(0, Type::Text, Box::new(e)))
@@ -325,7 +301,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
 
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            query_single_row(&conn, &sql, params, tx_details_from_row)
+            query_single_row(&conn, &sql, params, tx_details_from_row).map_err(From::from)
         })
         .await
     }

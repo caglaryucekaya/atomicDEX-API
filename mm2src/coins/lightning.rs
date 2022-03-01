@@ -32,8 +32,8 @@ use lightning::util::config::UserConfig;
 use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::utils::create_invoice_from_channelmanager;
 use lightning_invoice::Invoice;
-use lightning_persister::storage::{NodesAddressesMapShared, Storage};
-use lightning_persister::FilesystemPersister;
+use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared};
+use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, PlatformCoinConfirmations};
 use ln_connections::{connect_to_node, ConnectToNodeRes};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -140,13 +140,14 @@ pub struct LightningCoin {
     /// The lightning node invoice payer.
     pub invoice_payer: Arc<InvoicePayer<Arc<LightningEventHandler>>>,
     /// The lightning node persister that takes care of writing/reading data from storage.
-    pub persister: Arc<FilesystemPersister>,
+    pub persister: Arc<LightningPersister>,
     /// The mutex storing the inbound payments info.
     pub inbound_payments: PaymentsMapShared,
     /// The mutex storing the outbound payments info.
     pub outbound_payments: PaymentsMapShared,
-    /// The mutex storing the addresses of the nodes that are used for reconnecting.
-    pub nodes_addresses: NodesAddressesMapShared,
+    /// The mutex storing the addresses of the nodes that the lightning node has open channels with,
+    /// these addresses are used for reconnecting.
+    pub open_channel_nodes: NodesAddressesMapShared,
 }
 
 impl fmt::Debug for LightningCoin {
@@ -537,10 +538,13 @@ pub async fn connect_to_lightning_node(ctx: MmArc, req: ConnectToNodeRequest) ->
     // If a node that we have an open channel with changed it's address, "connect_to_lightning_node"
     // can be used to reconnect to the new address while saving this new address for reconnections.
     if let ConnectToNodeRes::ConnectedSuccessfully(_, _) = res {
-        if let Entry::Occupied(mut entry) = ln_coin.nodes_addresses.lock().entry(node_pubkey) {
+        if let Entry::Occupied(mut entry) = ln_coin.open_channel_nodes.lock().entry(node_pubkey) {
             entry.insert(node_addr);
         }
-        ln_coin.persister.save_nodes_addresses(ln_coin.nodes_addresses).await?;
+        ln_coin
+            .persister
+            .save_nodes_addresses(ln_coin.open_channel_nodes)
+            .await?;
     }
 
     Ok(res.to_string())
@@ -654,8 +658,11 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
     }
 
     // Saving node data to reconnect to it on restart
-    ln_coin.nodes_addresses.lock().insert(node_pubkey, node_addr);
-    ln_coin.persister.save_nodes_addresses(ln_coin.nodes_addresses).await?;
+    ln_coin.open_channel_nodes.lock().insert(node_pubkey, node_addr);
+    ln_coin
+        .persister
+        .save_nodes_addresses(ln_coin.open_channel_nodes)
+        .await?;
 
     Ok(OpenChannelResponse {
         temporary_channel_id: temp_channel_id.into(),
@@ -784,8 +791,8 @@ pub async fn generate_invoice(
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(GenerateInvoiceError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let nodes_addresses = ln_coin.nodes_addresses.lock().clone();
-    for (node_pubkey, node_addr) in nodes_addresses {
+    let open_channel_nodes = ln_coin.open_channel_nodes.lock().clone();
+    for (node_pubkey, node_addr) in open_channel_nodes {
         connect_to_node(node_pubkey, node_addr, ln_coin.peer_manager.clone())
             .await
             .error_log_with_msg(&format!(
@@ -842,8 +849,8 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(SendPaymentError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let nodes_addresses = ln_coin.nodes_addresses.lock().clone();
-    for (node_pubkey, node_addr) in nodes_addresses {
+    let open_channel_nodes = ln_coin.open_channel_nodes.lock().clone();
+    for (node_pubkey, node_addr) in open_channel_nodes {
         connect_to_node(node_pubkey, node_addr, ln_coin.peer_manager.clone())
             .await
             .error_log_with_msg(&format!(

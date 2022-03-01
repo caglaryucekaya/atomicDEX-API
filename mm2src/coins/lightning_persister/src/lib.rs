@@ -13,20 +13,22 @@ extern crate lightning;
 extern crate secp256k1;
 extern crate serde_json;
 
-use crate::storage::{NodesAddressesMap, NodesAddressesMapShared, Storage};
+use crate::storage::{FileSystemStorage, NodesAddressesMap, NodesAddressesMapShared, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use common::async_blocking;
 use common::fs::check_dir_operations;
+use db_common::sqlite::rusqlite::{Connection, Error as SqlError, NO_PARAMS};
+use db_common::sqlite::{query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
 use lightning::chain::chainmonitor;
 use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
 use lightning::chain::keysinterface::{KeysInterface, Sign};
 use lightning::chain::transaction::OutPoint;
-use lightning::ln::channelmanager::ChannelManager;
+use lightning::ln::channelmanager::{ChannelDetails, ChannelManager};
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
 use lightning::util::logger::Logger;
@@ -41,8 +43,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-/// FilesystemPersister persists channel data on disk, where each channel's
+/// LightningPersister persists channel data on disk, where each channel's
 /// data is stored in a file named after its funding outpoint.
+/// It is also used to persist payments and channels history to sqlite database.
 ///
 /// Warning: this module does the best it can with calls to persist data, but it
 /// can only guarantee that the data is passed to the drive. It is up to the
@@ -52,10 +55,12 @@ use std::sync::{Arc, Mutex};
 /// persistent.
 /// Corollary: especially when dealing with larger amounts of money, it is best
 /// practice to have multiple channel data backups and not rely only on one
-/// FilesystemPersister.
-pub struct FilesystemPersister {
+/// LightningPersister.
+
+pub struct LightningPersister {
     main_path: PathBuf,
     backup_path: Option<PathBuf>,
+    sqlite_connection: Arc<Mutex<Connection>>,
 }
 
 impl<Signer: Sign> DiskWriteable for ChannelMonitor<Signer> {
@@ -74,10 +79,52 @@ where
     fn write_to_file(&self, writer: &mut fs::File) -> Result<(), std::io::Error> { self.write(writer) }
 }
 
-impl FilesystemPersister {
-    /// Initialize a new FilesystemPersister and set the path to the individual channels'
+fn channels_history_table(ticker: &str) -> String { ticker.to_owned() + "_channels_history" }
+
+fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "CREATE TABLE IF NOT EXISTS ".to_owned()
+        + &table_name
+        + " (
+        id INTEGER NOT NULL PRIMARY KEY,
+        channel_id VARCHAR(255) NOT NULL,
+        counterparty_node_id VARCHAR(255) NOT NULL,
+        funding_tx VARCHAR(255),
+        funding_tx_output_index INTEGER,
+        funding_tx_value_sats INTEGER NOT NULL,
+        closing_tx VARCHAR(255),
+        closing_tx_output_index INTEGER,
+        closing_balance_sats INTEGER,
+        is_outbound INTEGER NOT NULL,
+        is_closed INTEGER NOT NULL
+    );";
+
+    Ok(sql)
+}
+
+fn insert_channel_in_history_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "INSERT INTO ".to_owned()
+        + &table_name
+        + " (channel_id, counterparty_node_id, funding_tx, funding_tx_output_index, funding_tx_value_sats, closing_tx, closing_tx_output_index, closing_balance_sats, is_outbound, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10);";
+
+    Ok(sql)
+}
+
+impl LightningPersister {
+    /// Initialize a new LightningPersister and set the path to the individual channels'
     /// files.
-    pub fn new(main_path: PathBuf, backup_path: Option<PathBuf>) -> Self { Self { main_path, backup_path } }
+    pub fn new(main_path: PathBuf, backup_path: Option<PathBuf>, sqlite_connection: Arc<Mutex<Connection>>) -> Self {
+        Self {
+            main_path,
+            backup_path,
+            sqlite_connection,
+        }
+    }
 
     /// Get the directory which was provided when this persister was initialized.
     pub fn main_path(&self) -> PathBuf { self.main_path.clone() }
@@ -131,7 +178,7 @@ impl FilesystemPersister {
         path
     }
 
-    /// Writes the provided `ChannelManager` to the path provided at `FilesystemPersister`
+    /// Writes the provided `ChannelManager` to the path provided at `LightningPersister`
     /// initialization, within a file called "manager".
     pub fn persist_manager<Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref>(
         &self,
@@ -218,7 +265,7 @@ impl FilesystemPersister {
     }
 }
 
-impl<ChannelSigner: Sign> chainmonitor::Persist<ChannelSigner> for FilesystemPersister {
+impl<ChannelSigner: Sign> chainmonitor::Persist<ChannelSigner> for LightningPersister {
     // TODO: We really need a way for the persister to inform the user that its time to crash/shut
     // down once these start returning failure.
     // A PermanentFailure implies we need to shut down since we're force-closing channels without
@@ -259,10 +306,10 @@ impl<ChannelSigner: Sign> chainmonitor::Persist<ChannelSigner> for FilesystemPer
 }
 
 #[async_trait]
-impl Storage for FilesystemPersister {
+impl FileSystemStorage for LightningPersister {
     type Error = std::io::Error;
 
-    async fn init(&self) -> Result<(), Self::Error> {
+    async fn init_fs(&self) -> Result<(), Self::Error> {
         let path = self.main_path();
         let backup_path = self.backup_path();
         async_blocking(move || {
@@ -276,7 +323,7 @@ impl Storage for FilesystemPersister {
         .await
     }
 
-    async fn is_initialized(&self) -> Result<bool, Self::Error> {
+    async fn is_fs_initialized(&self) -> Result<bool, Self::Error> {
         let dir_path = self.main_path();
         let backup_dir_path = self.backup_path();
         async_blocking(move || {
@@ -400,11 +447,85 @@ impl Storage for FilesystemPersister {
     }
 }
 
+#[async_trait]
+impl SqlStorage for LightningPersister {
+    type Error = SqlError;
+
+    async fn init_sql(&self, for_coin: &str) -> Result<(), Self::Error> {
+        let sqlite_connection = self.sqlite_connection.clone();
+        let sql_channels_history = create_channels_history_table_sql(for_coin)?;
+        async_blocking(move || {
+            let conn = sqlite_connection.lock().unwrap();
+            conn.execute(&sql_channels_history, NO_PARAMS).map(|_| ())?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn is_sql_initialized(&self, for_coin: &str) -> Result<bool, Self::Error> {
+        let channels_history_table = channels_history_table(for_coin);
+        validate_table_name(&channels_history_table)?;
+
+        let sqlite_connection = self.sqlite_connection.clone();
+        async_blocking(move || {
+            let conn = sqlite_connection.lock().unwrap();
+            let channels_history_initialized =
+                query_single_row(&conn, CHECK_TABLE_EXISTS_SQL, [channels_history_table], string_from_row)?;
+            Ok(channels_history_initialized.is_some())
+        })
+        .await
+    }
+
+    async fn add_channel_to_history(&self, for_coin: &str, channel_details: ChannelDetails) -> Result<(), Self::Error> {
+        let for_coin = for_coin.to_owned();
+        let sqlite_connection = self.sqlite_connection.clone();
+
+        async_blocking(move || {
+            let mut conn = sqlite_connection.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+
+            let channel_id = hex::encode(channel_details.channel_id);
+            let counterparty_node_id = channel_details.counterparty.node_id.to_string();
+            let funding_tx = channel_details
+                .funding_txo
+                .map(|outpoint| outpoint.txid.to_string())
+                .unwrap_or_default();
+            let funding_tx_output_index = channel_details
+                .funding_txo
+                .map(|outpoint| outpoint.index.to_string())
+                .unwrap_or_default();
+            let funding_tx_value_sats = channel_details.channel_value_satoshis.to_string();
+            let closing_tx = String::default();
+            let closing_tx_output_index = String::default();
+            let closing_balance_sats = String::default();
+            let is_outbound = (channel_details.is_outbound as i32).to_string();
+            let is_closed = 0_u8.to_string();
+
+            let params = [
+                channel_id,
+                counterparty_node_id,
+                funding_tx,
+                funding_tx_output_index,
+                funding_tx_value_sats,
+                closing_tx,
+                closing_tx_output_index,
+                closing_balance_sats,
+                is_outbound,
+                is_closed,
+            ];
+            sql_transaction.execute(&insert_channel_in_history_sql(&for_coin)?, &params)?;
+            sql_transaction.commit()?;
+            Ok(())
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate bitcoin;
     extern crate lightning;
-    use crate::FilesystemPersister;
+    use crate::LightningPersister;
     use bitcoin::blockdata::block::{Block, BlockHeader};
     use bitcoin::hashes::hex::FromHex;
     use bitcoin::Txid;
@@ -419,7 +540,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    impl Drop for FilesystemPersister {
+    impl Drop for LightningPersister {
         fn drop(&mut self) {
             // We test for invalid directory names, so it's OK if directory removal
             // fails.
@@ -430,14 +551,14 @@ mod tests {
         }
     }
 
-    // Integration-test the FilesystemPersister. Test relaying a few payments
+    // Integration-test the LightningPersister. Test relaying a few payments
     // and check that the persisted data is updated the appropriate number of
     // times.
     #[test]
     fn test_filesystem_persister() {
-        // Create the nodes, giving them FilesystemPersisters for data persisters.
-        let persister_0 = FilesystemPersister::new(PathBuf::from("test_filesystem_persister_0"), None);
-        let persister_1 = FilesystemPersister::new(PathBuf::from("test_filesystem_persister_1"), None);
+        // Create the nodes, giving them LightningPersisters for data persisters.
+        let persister_0 = LightningPersister::new(PathBuf::from("test_filesystem_persister_0"), None);
+        let persister_1 = LightningPersister::new(PathBuf::from("test_filesystem_persister_1"), None);
         let chanmon_cfgs = create_chanmon_cfgs(2);
         let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
         let chain_mon_0 = test_utils::TestChainMonitor::new(
@@ -533,7 +654,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_readonly_dir_perm_failure() {
-        let persister = FilesystemPersister::new(PathBuf::from("test_readonly_dir_perm_failure"), None);
+        let persister = LightningPersister::new(PathBuf::from("test_readonly_dir_perm_failure"), None);
         fs::create_dir_all(&persister.main_path).unwrap();
 
         // Set up a dummy channel and force close. This will produce a monitor
@@ -592,7 +713,7 @@ mod tests {
         // channel fails to open because the directories fail to be created. There
         // don't seem to be invalid filename characters on Unix that Rust doesn't
         // handle, hence why the test is Windows-only.
-        let persister = FilesystemPersister::new(PathBuf::from(":<>/"), None);
+        let persister = LightningPersister::new(PathBuf::from(":<>/"), None);
 
         let test_txo = OutPoint {
             txid: Txid::from_hex("8984484a580b825b9972d7adb15050b3ab624ccd731946b3eeddb92f4e7ef6be").unwrap(),

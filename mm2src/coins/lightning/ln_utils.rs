@@ -31,8 +31,8 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
-use lightning_persister::storage::Storage;
-use lightning_persister::FilesystemPersister;
+use lightning_persister::storage::FileSystemStorage;
+use lightning_persister::LightningPersister;
 use parking_lot::Mutex as PaMutex;
 use rand::RngCore;
 use rpc::v1::types::H256;
@@ -57,7 +57,7 @@ pub type ChainMonitor = chainmonitor::ChainMonitor<
     Arc<UtxoStandardCoin>,
     Arc<PlatformFields>,
     Arc<LogState>,
-    Arc<FilesystemPersister>,
+    Arc<LightningPersister>,
 >;
 
 pub type ChannelManager = SimpleArcChannelManager<ChainMonitor, UtxoStandardCoin, PlatformFields, LogState>;
@@ -171,10 +171,18 @@ pub async fn start_lightning(
     let ticker = conf.ticker.clone();
     let ln_data_dir = ln_data_dir(ctx, &ticker);
     let ln_data_backup_dir = ln_data_backup_dir(ctx, params.backup_path, &ticker);
-    let persister = Arc::new(FilesystemPersister::new(ln_data_dir, ln_data_backup_dir));
-    let is_initialized = persister.is_initialized().await?;
+    let persister = Arc::new(LightningPersister::new(
+        ln_data_dir,
+        ln_data_backup_dir,
+        ctx.sqlite_connection
+            .ok_or(MmError::new(EnableLightningError::SqlError(
+                "sqlite_connection is not initialized".into(),
+            )))?
+            .clone(),
+    ));
+    let is_initialized = persister.is_fs_initialized().await?;
     if !is_initialized {
-        persister.init().await?;
+        persister.init_fs().await?;
     }
 
     // Initialize the Filter. PlatformFields implements the Filter trait, we can use it to construct the filter.
@@ -412,7 +420,7 @@ pub async fn start_lightning(
     );
 
     // If node is restarting read other nodes data from disk and reconnect to channel nodes/peers if possible.
-    let mut nodes_addresses_map = HashMap::new();
+    let mut open_channel_nodes_map = HashMap::new();
     if restarting_node {
         let mut nodes_addresses = persister.get_nodes_addresses().await?;
         for (pubkey, node_addr) in nodes_addresses.drain() {
@@ -422,14 +430,14 @@ pub async fn start_lightning(
                 .map(|chan| chan.counterparty.node_id)
                 .any(|node_id| node_id == pubkey)
             {
-                nodes_addresses_map.insert(pubkey, node_addr);
+                open_channel_nodes_map.insert(pubkey, node_addr);
             }
         }
     }
-    let nodes_addresses = Arc::new(PaMutex::new(nodes_addresses_map));
+    let open_channel_nodes = Arc::new(PaMutex::new(open_channel_nodes_map));
 
     if restarting_node {
-        spawn(connect_to_nodes_loop(nodes_addresses.clone(), peer_manager.clone()));
+        spawn(connect_to_nodes_loop(open_channel_nodes.clone(), peer_manager.clone()));
     }
 
     // Broadcast Node Announcement
@@ -453,7 +461,7 @@ pub async fn start_lightning(
         persister,
         inbound_payments,
         outbound_payments,
-        nodes_addresses,
+        open_channel_nodes,
     })
 }
 

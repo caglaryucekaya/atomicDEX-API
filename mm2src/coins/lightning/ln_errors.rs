@@ -42,6 +42,8 @@ pub enum EnableLightningError {
     HashError(String),
     #[display(fmt = "RPC error {}", _0)]
     RpcError(String),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
     ConnectToNodeError(String),
 }
 
@@ -56,7 +58,8 @@ impl HttpStatusCode for EnableLightningError {
             | EnableLightningError::IOError(_)
             | EnableLightningError::HashError(_)
             | EnableLightningError::ConnectToNodeError(_)
-            | EnableLightningError::InvalidConfiguration(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | EnableLightningError::InvalidConfiguration(_)
+            | EnableLightningError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

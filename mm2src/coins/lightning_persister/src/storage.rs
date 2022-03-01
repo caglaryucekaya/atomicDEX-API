@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use lightning::ln::channelmanager::ChannelDetails;
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
 use parking_lot::Mutex as PaMutex;
@@ -11,13 +12,13 @@ pub type NodesAddressesMap = HashMap<PublicKey, SocketAddr>;
 pub type NodesAddressesMapShared = Arc<PaMutex<NodesAddressesMap>>;
 
 #[async_trait]
-pub trait Storage: Send + Sync + 'static {
+pub trait FileSystemStorage {
     type Error;
 
     /// Initializes dirs/collection/tables in storage for a specified coin
-    async fn init(&self) -> Result<(), Self::Error>;
+    async fn init_fs(&self) -> Result<(), Self::Error>;
 
-    async fn is_initialized(&self) -> Result<bool, Self::Error>;
+    async fn is_fs_initialized(&self) -> Result<bool, Self::Error>;
 
     async fn get_nodes_addresses(&self) -> Result<HashMap<PublicKey, SocketAddr>, Self::Error>;
 
@@ -30,4 +31,16 @@ pub trait Storage: Send + Sync + 'static {
     async fn get_scorer(&self) -> Result<Scorer, Self::Error>;
 
     async fn save_scorer(&self, scorer: Arc<Mutex<Scorer>>) -> Result<(), Self::Error>;
+}
+
+#[async_trait]
+pub trait SqlStorage {
+    type Error;
+
+    /// Initializes dirs/collection/tables in storage for a specified coin
+    async fn init_sql(&self, for_coin: &str) -> Result<(), Self::Error>;
+
+    async fn is_sql_initialized(&self, for_coin: &str) -> Result<bool, Self::Error>;
+
+    async fn add_channel_to_history(&self, for_coin: &str, channel_details: ChannelDetails) -> Result<(), Self::Error>;
 }
