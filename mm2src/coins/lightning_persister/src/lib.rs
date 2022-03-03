@@ -529,6 +529,7 @@ mod tests {
     use bitcoin::blockdata::block::{Block, BlockHeader};
     use bitcoin::hashes::hex::FromHex;
     use bitcoin::Txid;
+    use db_common::sqlite::rusqlite::Connection;
     use lightning::chain::chainmonitor::Persist;
     use lightning::chain::transaction::OutPoint;
     use lightning::chain::ChannelMonitorUpdateErr;
@@ -539,6 +540,7 @@ mod tests {
     use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     impl Drop for LightningPersister {
         fn drop(&mut self) {
@@ -557,8 +559,16 @@ mod tests {
     #[test]
     fn test_filesystem_persister() {
         // Create the nodes, giving them LightningPersisters for data persisters.
-        let persister_0 = LightningPersister::new(PathBuf::from("test_filesystem_persister_0"), None);
-        let persister_1 = LightningPersister::new(PathBuf::from("test_filesystem_persister_1"), None);
+        let persister_0 = LightningPersister::new(
+            PathBuf::from("test_filesystem_persister_0"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
+        let persister_1 = LightningPersister::new(
+            PathBuf::from("test_filesystem_persister_1"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
         let chanmon_cfgs = create_chanmon_cfgs(2);
         let mut node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
         let chain_mon_0 = test_utils::TestChainMonitor::new(
@@ -713,7 +723,11 @@ mod tests {
         // channel fails to open because the directories fail to be created. There
         // don't seem to be invalid filename characters on Unix that Rust doesn't
         // handle, hence why the test is Windows-only.
-        let persister = LightningPersister::new(PathBuf::from(":<>/"), None);
+        let persister = LightningPersister::new(
+            PathBuf::from(":<>/"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
 
         let test_txo = OutPoint {
             txid: Txid::from_hex("8984484a580b825b9972d7adb15050b3ab624ccd731946b3eeddb92f4e7ef6be").unwrap(),

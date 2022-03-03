@@ -2971,6 +2971,7 @@ name = "lightning-background-processor"
 version = "0.0.104"
 dependencies = [
  "bitcoin",
+ "db_common",
  "lightning",
  "lightning-invoice",
  "lightning-persister",

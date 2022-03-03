@@ -340,6 +340,7 @@ mod tests {
     use bitcoin::blockdata::constants::genesis_block;
     use bitcoin::blockdata::transaction::{Transaction, TxOut};
     use bitcoin::network::constants::Network;
+    use db_common::sqlite::rusqlite::Connection;
     use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
     use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager};
     use lightning::chain::transaction::OutPoint;
@@ -445,6 +446,7 @@ mod tests {
             let persister = Arc::new(LightningPersister::new(
                 PathBuf::from(format!("{}_persister_{}", persist_dir, i)),
                 None,
+                Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
             ));
             let seed = [i as u8; 32];
             let network = Network::Testnet;

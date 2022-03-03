@@ -83,10 +83,10 @@ pub async fn connect_to_node(
     ))
 }
 
-pub async fn connect_to_nodes_loop(open_channel_nodes: NodesAddressesMapShared, peer_manager: Arc<PeerManager>) {
+pub async fn connect_to_nodes_loop(open_channels_nodes: NodesAddressesMapShared, peer_manager: Arc<PeerManager>) {
     loop {
-        let open_channel_nodes = open_channel_nodes.lock().clone();
-        for (pubkey, node_addr) in open_channel_nodes {
+        let open_channels_nodes = open_channels_nodes.lock().clone();
+        for (pubkey, node_addr) in open_channels_nodes {
             let peer_manager = peer_manager.clone();
             match connect_to_node(pubkey, node_addr, peer_manager.clone()).await {
                 Ok(res) => {

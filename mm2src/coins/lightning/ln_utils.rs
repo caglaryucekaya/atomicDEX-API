@@ -420,7 +420,7 @@ pub async fn start_lightning(
     );
 
     // If node is restarting read other nodes data from disk and reconnect to channel nodes/peers if possible.
-    let mut open_channel_nodes_map = HashMap::new();
+    let mut open_channels_nodes_map = HashMap::new();
     if restarting_node {
         let mut nodes_addresses = persister.get_nodes_addresses().await?;
         for (pubkey, node_addr) in nodes_addresses.drain() {
@@ -430,14 +430,14 @@ pub async fn start_lightning(
                 .map(|chan| chan.counterparty.node_id)
                 .any(|node_id| node_id == pubkey)
             {
-                open_channel_nodes_map.insert(pubkey, node_addr);
+                open_channels_nodes_map.insert(pubkey, node_addr);
             }
         }
     }
-    let open_channel_nodes = Arc::new(PaMutex::new(open_channel_nodes_map));
+    let open_channels_nodes = Arc::new(PaMutex::new(open_channels_nodes_map));
 
     if restarting_node {
-        spawn(connect_to_nodes_loop(open_channel_nodes.clone(), peer_manager.clone()));
+        spawn(connect_to_nodes_loop(open_channels_nodes.clone(), peer_manager.clone()));
     }
 
     // Broadcast Node Announcement
@@ -461,7 +461,7 @@ pub async fn start_lightning(
         persister,
         inbound_payments,
         outbound_payments,
-        open_channel_nodes,
+        open_channels_nodes,
     })
 }
 

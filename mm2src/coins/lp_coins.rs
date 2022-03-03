@@ -1415,6 +1415,7 @@ pub trait MmCoin: SwapOps + MarketCoinOps + fmt::Debug + Send + Sync + 'static {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum MmCoinEnum {
     UtxoCoin(UtxoStandardCoin),
     QtumCoin(QtumCoin),
@@ -1425,7 +1426,7 @@ pub enum MmCoinEnum {
     Bch(BchCoin),
     SlpToken(SlpToken),
     #[cfg(not(target_arch = "wasm32"))]
-    LightningCoin(Box<LightningCoin>),
+    LightningCoin(LightningCoin),
     Test(TestCoin),
 }
 
@@ -1459,7 +1460,7 @@ impl From<SlpToken> for MmCoinEnum {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl From<LightningCoin> for MmCoinEnum {
-    fn from(c: LightningCoin) -> MmCoinEnum { MmCoinEnum::LightningCoin(Box::new(c)) }
+    fn from(c: LightningCoin) -> MmCoinEnum { MmCoinEnum::LightningCoin(c) }
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "zhtlc"))]
@@ -1479,7 +1480,7 @@ impl Deref for MmCoinEnum {
             MmCoinEnum::Bch(ref c) => c,
             MmCoinEnum::SlpToken(ref c) => c,
             #[cfg(not(target_arch = "wasm32"))]
-            MmCoinEnum::LightningCoin(ref c) => &**c,
+            MmCoinEnum::LightningCoin(ref c) => c,
             #[cfg(all(not(target_arch = "wasm32"), feature = "zhtlc"))]
             MmCoinEnum::ZCoin(ref c) => c,
             MmCoinEnum::Test(ref c) => c,

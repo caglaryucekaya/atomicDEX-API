@@ -147,7 +147,7 @@ pub struct LightningCoin {
     pub outbound_payments: PaymentsMapShared,
     /// The mutex storing the addresses of the nodes that the lightning node has open channels with,
     /// these addresses are used for reconnecting.
-    pub open_channel_nodes: NodesAddressesMapShared,
+    pub open_channels_nodes: NodesAddressesMapShared,
 }
 
 impl fmt::Debug for LightningCoin {
@@ -538,12 +538,12 @@ pub async fn connect_to_lightning_node(ctx: MmArc, req: ConnectToNodeRequest) ->
     // If a node that we have an open channel with changed it's address, "connect_to_lightning_node"
     // can be used to reconnect to the new address while saving this new address for reconnections.
     if let ConnectToNodeRes::ConnectedSuccessfully(_, _) = res {
-        if let Entry::Occupied(mut entry) = ln_coin.open_channel_nodes.lock().entry(node_pubkey) {
+        if let Entry::Occupied(mut entry) = ln_coin.open_channels_nodes.lock().entry(node_pubkey) {
             entry.insert(node_addr);
         }
         ln_coin
             .persister
-            .save_nodes_addresses(ln_coin.open_channel_nodes)
+            .save_nodes_addresses(ln_coin.open_channels_nodes)
             .await?;
     }
 
@@ -658,10 +658,10 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
     }
 
     // Saving node data to reconnect to it on restart
-    ln_coin.open_channel_nodes.lock().insert(node_pubkey, node_addr);
+    ln_coin.open_channels_nodes.lock().insert(node_pubkey, node_addr);
     ln_coin
         .persister
-        .save_nodes_addresses(ln_coin.open_channel_nodes)
+        .save_nodes_addresses(ln_coin.open_channels_nodes)
         .await?;
 
     Ok(OpenChannelResponse {
@@ -677,9 +677,9 @@ pub struct ListChannelsRequest {
 
 #[derive(Serialize)]
 pub struct ChannelDetailsForRPC {
-    pub channel_id: String,
-    pub counterparty_node_id: String,
-    pub funding_tx: Option<String>,
+    pub channel_id: H256Json,
+    pub counterparty_node_id: PublicKeyForRPC,
+    pub funding_tx: Option<H256Json>,
     pub funding_tx_output_index: Option<u16>,
     pub funding_tx_value_sats: u64,
     /// True if the channel was initiated (and thus funded) by us.
@@ -700,9 +700,11 @@ pub struct ChannelDetailsForRPC {
 impl From<ChannelDetails> for ChannelDetailsForRPC {
     fn from(details: ChannelDetails) -> ChannelDetailsForRPC {
         ChannelDetailsForRPC {
-            channel_id: hex::encode(details.channel_id),
-            counterparty_node_id: details.counterparty.node_id.to_string(),
-            funding_tx: details.funding_txo.map(|tx| tx.txid.to_string()),
+            channel_id: details.channel_id.into(),
+            counterparty_node_id: PublicKeyForRPC(details.counterparty.node_id),
+            funding_tx: details
+                .funding_txo
+                .map(|tx| H256Json::from(tx.txid.as_hash().into_inner()).reversed()),
             funding_tx_output_index: details.funding_txo.map(|tx| tx.index),
             funding_tx_value_sats: details.channel_value_satoshis,
             is_outbound: details.is_outbound,
@@ -791,8 +793,8 @@ pub async fn generate_invoice(
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(GenerateInvoiceError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let open_channel_nodes = ln_coin.open_channel_nodes.lock().clone();
-    for (node_pubkey, node_addr) in open_channel_nodes {
+    let open_channels_nodes = ln_coin.open_channels_nodes.lock().clone();
+    for (node_pubkey, node_addr) in open_channels_nodes {
         connect_to_node(node_pubkey, node_addr, ln_coin.peer_manager.clone())
             .await
             .error_log_with_msg(&format!(
@@ -849,8 +851,8 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(SendPaymentError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let open_channel_nodes = ln_coin.open_channel_nodes.lock().clone();
-    for (node_pubkey, node_addr) in open_channel_nodes {
+    let open_channels_nodes = ln_coin.open_channels_nodes.lock().clone();
+    for (node_pubkey, node_addr) in open_channels_nodes {
         connect_to_node(node_pubkey, node_addr, ln_coin.peer_manager.clone())
             .await
             .error_log_with_msg(&format!(
