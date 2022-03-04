@@ -85,6 +85,21 @@ pub struct PlatformFields {
 }
 
 impl PlatformFields {
+    pub fn new(
+        platform_coin: UtxoStandardCoin,
+        network: BlockchainNetwork,
+        default_fees_and_confirmations: PlatformCoinConfirmations,
+    ) -> Self {
+        PlatformFields {
+            platform_coin,
+            network,
+            default_fees_and_confirmations,
+            registered_txs: PaMutex::new(HashMap::new()),
+            registered_outputs: PaMutex::new(Vec::new()),
+            unsigned_funding_txs: PaMutex::new(HashMap::new()),
+        }
+    }
+
     pub fn add_tx(&self, txid: &Txid, script_pubkey: &Script) {
         let mut registered_txs = self.registered_txs.lock();
         match registered_txs.get_mut(txid) {
