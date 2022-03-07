@@ -16,8 +16,10 @@ extern crate serde_json;
 use crate::storage::{FileSystemStorage, NodesAddressesMap, NodesAddressesMapShared, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
+use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::{FromHex, ToHex};
+use bitcoin::Network;
 use common::async_blocking;
 use common::fs::check_dir_operations;
 use db_common::sqlite::rusqlite::{Connection, Error as SqlError, NO_PARAMS};
@@ -406,8 +408,11 @@ impl FileSystemStorage for LightningPersister {
         .await
     }
 
-    async fn get_network_graph(&self) -> Result<NetworkGraph, Self::Error> {
+    async fn get_network_graph(&self, network: Network) -> Result<NetworkGraph, Self::Error> {
         let path = self.network_graph_path();
+        if !path.exists() {
+            return Ok(NetworkGraph::new(genesis_block(network).header.block_hash()));
+        }
         async_blocking(move || {
             let file = fs::File::open(path)?;
             common::log::info!("Reading the saved lightning network graph from file, this can take some time!");
@@ -428,6 +433,9 @@ impl FileSystemStorage for LightningPersister {
 
     async fn get_scorer(&self) -> Result<Scorer, Self::Error> {
         let path = self.scorer_path();
+        if !path.exists() {
+            return Ok(Scorer::default());
+        }
         async_blocking(move || {
             let file = fs::File::open(path)?;
             Scorer::read(&mut BufReader::new(file))

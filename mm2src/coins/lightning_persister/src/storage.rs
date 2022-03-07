@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use bitcoin::Network;
 use lightning::ln::channelmanager::ChannelDetails;
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
@@ -24,7 +25,7 @@ pub trait FileSystemStorage {
 
     async fn save_nodes_addresses(&self, nodes_addresses: NodesAddressesMapShared) -> Result<(), Self::Error>;
 
-    async fn get_network_graph(&self) -> Result<NetworkGraph, Self::Error>;
+    async fn get_network_graph(&self, network: Network) -> Result<NetworkGraph, Self::Error>;
 
     async fn save_network_graph(&self, network_graph: Arc<NetworkGraph>) -> Result<(), Self::Error>;
 

@@ -6,7 +6,6 @@ use crate::utxo::rpc_clients::{electrum_script_hash, BestBlock as RpcBestBlock, 
 use crate::utxo::utxo_standard::UtxoStandardCoin;
 use crate::DerivationMethod;
 use bitcoin::blockdata::block::BlockHeader;
-use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
@@ -125,6 +124,63 @@ pub fn ln_data_backup_dir(ctx: &MmArc, path: Option<String>, ticker: &str) -> Op
     })
 }
 
+async fn init_persister(
+    ctx: &MmArc,
+    ticker: String,
+    backup_path: Option<String>,
+) -> EnableLightningResult<Arc<LightningPersister>> {
+    let ln_data_dir = ln_data_dir(ctx, &ticker);
+    let ln_data_backup_dir = ln_data_backup_dir(ctx, backup_path, &ticker);
+    let persister = Arc::new(LightningPersister::new(
+        ln_data_dir,
+        ln_data_backup_dir,
+        ctx.sqlite_connection
+            .ok_or(MmError::new(EnableLightningError::SqlError(
+                "sqlite_connection is not initialized".into(),
+            )))?
+            .clone(),
+    ));
+    let is_initialized = persister.is_fs_initialized().await?;
+    if !is_initialized {
+        persister.init_fs().await?;
+    }
+    Ok(persister)
+}
+
+fn init_keys_manager(ctx: &MmArc) -> EnableLightningResult<Arc<KeysManager>> {
+    // The current time is used to derive random numbers from the seed where required, to ensure all random generation is unique across restarts.
+    let seed: [u8; 32] = ctx.secp256k1_key_pair().private().secret.into();
+    let cur = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_to_mm(|e| EnableLightningError::SystemTimeError(e.to_string()))?;
+
+    Ok(Arc::new(KeysManager::new(&seed, cur.as_secs(), cur.subsec_nanos())))
+}
+
+async fn persist_network_graph_loop(persister: Arc<LightningPersister>, network_graph: Arc<NetworkGraph>) {
+    loop {
+        if let Err(e) = persister.save_network_graph(network_graph.clone()).await {
+            log::warn!(
+                "Failed to persist network graph error: {}, please check disk space and permissions",
+                e
+            );
+        }
+        Timer::sleep(NETWORK_GRAPH_PERSIST_INTERVAL as f64).await;
+    }
+}
+
+async fn persist_scorer_loop(persister: Arc<LightningPersister>, scorer: Arc<Mutex<Scorer>>) {
+    loop {
+        if let Err(e) = persister.save_scorer(scorer.clone()).await {
+            log::warn!(
+                "Failed to persist scorer error: {}, please check disk space and permissions",
+                e
+            );
+        }
+        Timer::sleep(SCORER_PERSIST_INTERVAL as f64).await;
+    }
+}
+
 async fn init_peer_manager(
     ctx: MmArc,
     listening_port: u16,
@@ -211,23 +267,8 @@ pub async fn start_lightning(
     // broadcaster.
     let broadcaster = Arc::new(platform_coin);
 
-    // Initialize Persist
-    let ticker = conf.ticker.clone();
-    let ln_data_dir = ln_data_dir(ctx, &ticker);
-    let ln_data_backup_dir = ln_data_backup_dir(ctx, params.backup_path, &ticker);
-    let persister = Arc::new(LightningPersister::new(
-        ln_data_dir,
-        ln_data_backup_dir,
-        ctx.sqlite_connection
-            .ok_or(MmError::new(EnableLightningError::SqlError(
-                "sqlite_connection is not initialized".into(),
-            )))?
-            .clone(),
-    ));
-    let is_initialized = persister.is_fs_initialized().await?;
-    if !is_initialized {
-        persister.init_fs().await?;
-    }
+    // Initialize Persister
+    let persister = init_persister(ctx, conf.ticker.clone(), params.backup_path).await?;
 
     // Initialize the Filter. PlatformFields implements the Filter trait, we can use it to construct the filter.
     let filter = Some(platform_fields.clone());
@@ -241,15 +282,8 @@ pub async fn start_lightning(
         persister.clone(),
     ));
 
-    let seed: [u8; 32] = ctx.secp256k1_key_pair().private().secret.into();
-
-    // The current time is used to derive random numbers from the seed where required, to ensure all random generation is unique across restarts.
-    let cur = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_to_mm(|e| EnableLightningError::SystemTimeError(e.to_string()))?;
-
     // Initialize the KeysManager
-    let keys_manager = Arc::new(KeysManager::new(&seed, cur.as_secs(), cur.subsec_nanos()));
+    let keys_manager = init_keys_manager(ctx)?;
 
     // Read ChannelMonitor state from disk, important for lightning node is restarting and has at least 1 channel
     let mut channelmonitors = persister
@@ -263,7 +297,6 @@ pub async fn start_lightning(
         }
     }
 
-    let mut restarting_node = true;
     // TODO: Right now it's safe to unwrap here, when implementing Native client for lightning whenever filter is used
     // the code it's used in will be a part of the electrum client implementation only
     let rpc_client = match &filter.clone().unwrap().platform_coin.as_ref().rpc_client {
@@ -301,7 +334,6 @@ pub async fn start_lightning(
                 .map_to_mm(|e| EnableLightningError::IOError(e.to_string()))?
         } else {
             // Initialize the ChannelManager to starting a new node without history
-            restarting_node = false;
             let chain_params = ChainParameters {
                 network,
                 best_block: BestBlock::new(best_block_hash, best_block.height as u32),
@@ -322,7 +354,7 @@ pub async fn start_lightning(
     let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 
     // Sync ChannelMonitors and ChannelManager to chain tip if the node is restarting and has open channels
-    if restarting_node && channel_manager_blockhash != best_block_hash {
+    if channel_manager_blockhash != best_block_hash {
         process_txs_unconfirmations(
             filter.clone().unwrap().clone(),
             chain_monitor.clone(),
@@ -350,29 +382,13 @@ pub async fn start_lightning(
     }
 
     // Initialize the NetGraphMsgHandler. This is used for providing routes to send payments over
-    let default_network_graph = NetworkGraph::new(genesis_block(network).header.block_hash());
-    let network_graph = Arc::new(persister.get_network_graph().await.unwrap_or(default_network_graph));
+    let network_graph = Arc::new(persister.get_network_graph(network).await?);
+    spawn(persist_network_graph_loop(persister.clone(), network_graph.clone()));
     let network_gossip = Arc::new(NetGraphMsgHandler::new(
         network_graph.clone(),
         None::<Arc<dyn Access + Send + Sync>>,
         logger.clone(),
     ));
-    let network_graph_persister = persister.clone();
-    let network_graph_persist = network_graph.clone();
-    spawn(async move {
-        loop {
-            if let Err(e) = network_graph_persister
-                .save_network_graph(network_graph_persist.clone())
-                .await
-            {
-                log::warn!(
-                    "Failed to persist network graph error: {}, please check disk space and permissions",
-                    e
-                );
-            }
-            Timer::sleep(NETWORK_GRAPH_PERSIST_INTERVAL as f64).await;
-        }
-    });
 
     // Initialize the PeerManager
     let peer_manager = init_peer_manager(
@@ -409,20 +425,8 @@ pub async fn start_lightning(
     ));
 
     // Initialize routing Scorer
-    let scorer = Arc::new(Mutex::new(persister.get_scorer().await.unwrap_or_default()));
-    let scorer_persister = persister.clone();
-    let scorer_persist = scorer.clone();
-    spawn(async move {
-        loop {
-            if let Err(e) = scorer_persister.save_scorer(scorer_persist.clone()).await {
-                log::warn!(
-                    "Failed to persist scorer error: {}, please check disk space and permissions",
-                    e
-                );
-            }
-            Timer::sleep(SCORER_PERSIST_INTERVAL as f64).await;
-        }
-    });
+    let scorer = Arc::new(Mutex::new(persister.get_scorer().await?));
+    spawn(persist_scorer_loop(persister.clone(), scorer.clone()));
 
     // Create InvoicePayer
     let router = DefaultRouter::new(network_graph, logger.clone());
@@ -458,9 +462,7 @@ pub async fn start_lightning(
     let open_channels_nodes = Arc::new(PaMutex::new(
         get_open_channels_nodes_addresses(persister.clone(), channel_manager.clone()).await?,
     ));
-    if restarting_node {
-        spawn(connect_to_nodes_loop(open_channels_nodes.clone(), peer_manager.clone()));
-    }
+    spawn(connect_to_nodes_loop(open_channels_nodes.clone(), peer_manager.clone()));
 
     // Broadcast Node Announcement
     spawn(ln_node_announcement_loop(
