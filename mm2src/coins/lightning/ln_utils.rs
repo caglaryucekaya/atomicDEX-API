@@ -157,6 +157,129 @@ fn init_keys_manager(ctx: &MmArc) -> EnableLightningResult<Arc<KeysManager>> {
     Ok(Arc::new(KeysManager::new(&seed, cur.as_secs(), cur.subsec_nanos())))
 }
 
+async fn init_channel_manager(
+    platform_fields: Arc<PlatformFields>,
+    logger: Arc<LogState>,
+    persister: Arc<LightningPersister>,
+    keys_manager: Arc<KeysManager>,
+    conf: LightningCoinConf,
+) -> EnableLightningResult<(Arc<ChainMonitor>, Arc<ChannelManager>)> {
+    // Initialize the FeeEstimator. UtxoStandardCoin implements the FeeEstimator trait, so it'll act as our fee estimator.
+    let fee_estimator = platform_fields.clone();
+
+    // Initialize the BroadcasterInterface. UtxoStandardCoin implements the BroadcasterInterface trait, so it'll act as our transaction
+    // broadcaster.
+    let broadcaster = Arc::new(platform_fields.platform_coin.clone());
+
+    // Initialize the ChainMonitor
+    let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+        Some(platform_fields.clone()),
+        broadcaster.clone(),
+        logger.clone(),
+        fee_estimator.clone(),
+        persister.clone(),
+    ));
+
+    // Read ChannelMonitor state from disk, important for lightning node is restarting and has at least 1 channel
+    let mut channelmonitors = persister
+        .read_channelmonitors(keys_manager.clone())
+        .map_to_mm(|e| EnableLightningError::IOError(e.to_string()))?;
+
+    // This is used for Electrum only to prepare for chain synchronization
+    for (_, chan_mon) in channelmonitors.iter() {
+        chan_mon.load_outputs_to_watch(&platform_fields);
+    }
+
+    let rpc_client = match &platform_fields.platform_coin.as_ref().rpc_client {
+        UtxoRpcClientEnum::Electrum(c) => c.clone(),
+        UtxoRpcClientEnum::Native(_) => {
+            return MmError::err(EnableLightningError::UnsupportedMode(
+                "Lightning network".into(),
+                "electrum".into(),
+            ))
+        },
+    };
+    let best_header = get_best_header(&rpc_client).await?;
+    let best_block = RpcBestBlock::from(best_header.clone());
+    let best_block_hash = BlockHash::from_hash(
+        sha256d::Hash::from_slice(&best_block.hash.0).map_to_mm(|e| EnableLightningError::HashError(e.to_string()))?,
+    );
+    let (channel_manager_blockhash, channel_manager) = {
+        let user_config = conf.into();
+        if let Ok(mut f) = File::open(persister.manager_path()) {
+            let mut channel_monitor_mut_references = Vec::new();
+            for (_, channel_monitor) in channelmonitors.iter_mut() {
+                channel_monitor_mut_references.push(channel_monitor);
+            }
+            // Read ChannelManager data from the file
+            let read_args = ChannelManagerReadArgs::new(
+                keys_manager.clone(),
+                fee_estimator.clone(),
+                chain_monitor.clone(),
+                broadcaster.clone(),
+                logger.clone(),
+                user_config,
+                channel_monitor_mut_references,
+            );
+            <(BlockHash, ChannelManager)>::read(&mut f, read_args)
+                .map_to_mm(|e| EnableLightningError::IOError(e.to_string()))?
+        } else {
+            // Initialize the ChannelManager to starting a new node without history
+            let chain_params = ChainParameters {
+                network: platform_fields.network.clone().into(),
+                best_block: BestBlock::new(best_block_hash, best_block.height as u32),
+            };
+            let new_channel_manager = channelmanager::ChannelManager::new(
+                fee_estimator.clone(),
+                chain_monitor.clone(),
+                broadcaster.clone(),
+                logger.clone(),
+                keys_manager.clone(),
+                user_config,
+                chain_params,
+            );
+            (best_block_hash, new_channel_manager)
+        }
+    };
+
+    let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
+
+    // Sync ChannelMonitors and ChannelManager to chain tip if the node is restarting and has open channels
+    if channel_manager_blockhash != best_block_hash {
+        process_txs_unconfirmations(platform_fields.clone(), chain_monitor.clone(), channel_manager.clone()).await;
+        process_txs_confirmations(
+            // It's safe to use unwrap here for now until implementing Native Client for Lightning
+            platform_fields.clone(),
+            rpc_client.clone(),
+            chain_monitor.clone(),
+            channel_manager.clone(),
+            best_header.block_height(),
+        )
+        .await;
+        update_best_block(chain_monitor.clone(), channel_manager.clone(), best_header).await;
+    }
+
+    // Give ChannelMonitors to ChainMonitor
+    for (_, channel_monitor) in channelmonitors.drain(..) {
+        let funding_outpoint = channel_monitor.get_funding_txo().0;
+        chain_monitor
+            .watch_channel(funding_outpoint, channel_monitor)
+            .map_to_mm(|e| EnableLightningError::IOError(format!("{:?}", e)))?;
+    }
+
+    // Update best block whenever there's a new chain tip or a block has been newly disconnected
+    spawn(ln_best_block_update_loop(
+        // It's safe to use unwrap here for now until implementing Native Client for Lightning
+        platform_fields,
+        chain_monitor.clone(),
+        channel_manager.clone(),
+        rpc_client.clone(),
+        best_block,
+    ));
+
+    Ok((chain_monitor, channel_manager))
+}
+
 async fn persist_network_graph_loop(persister: Arc<LightningPersister>, network_graph: Arc<NetworkGraph>) {
     loop {
         if let Err(e) = persister.save_network_graph(network_graph.clone()).await {
@@ -257,129 +380,14 @@ pub async fn start_lightning(
         protocol_conf.confirmations,
     ));
 
-    // Initialize the FeeEstimator. UtxoStandardCoin implements the FeeEstimator trait, so it'll act as our fee estimator.
-    let fee_estimator = platform_fields.clone();
-
     // Initialize the Logger
     let logger = ctx.log.0.clone();
-
-    // Initialize the BroadcasterInterface. UtxoStandardCoin implements the BroadcasterInterface trait, so it'll act as our transaction
-    // broadcaster.
-    let broadcaster = Arc::new(platform_coin);
 
     // Initialize Persister
     let persister = init_persister(ctx, conf.ticker.clone(), params.backup_path).await?;
 
-    // Initialize the Filter. PlatformFields implements the Filter trait, we can use it to construct the filter.
-    let filter = Some(platform_fields.clone());
-
-    // Initialize the ChainMonitor
-    let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
-        filter.clone(),
-        broadcaster.clone(),
-        logger.clone(),
-        fee_estimator.clone(),
-        persister.clone(),
-    ));
-
     // Initialize the KeysManager
     let keys_manager = init_keys_manager(ctx)?;
-
-    // Read ChannelMonitor state from disk, important for lightning node is restarting and has at least 1 channel
-    let mut channelmonitors = persister
-        .read_channelmonitors(keys_manager.clone())
-        .map_to_mm(|e| EnableLightningError::IOError(e.to_string()))?;
-
-    // This is used for Electrum only to prepare for chain synchronization
-    if let Some(ref filter) = filter {
-        for (_, chan_mon) in channelmonitors.iter() {
-            chan_mon.load_outputs_to_watch(filter);
-        }
-    }
-
-    // TODO: Right now it's safe to unwrap here, when implementing Native client for lightning whenever filter is used
-    // the code it's used in will be a part of the electrum client implementation only
-    let rpc_client = match &filter.clone().unwrap().platform_coin.as_ref().rpc_client {
-        UtxoRpcClientEnum::Electrum(c) => c.clone(),
-        UtxoRpcClientEnum::Native(_) => {
-            return MmError::err(EnableLightningError::UnsupportedMode(
-                "Lightning network".into(),
-                "electrum".into(),
-            ))
-        },
-    };
-    let best_header = get_best_header(&rpc_client).await?;
-    let best_block = RpcBestBlock::from(best_header.clone());
-    let best_block_hash = BlockHash::from_hash(
-        sha256d::Hash::from_slice(&best_block.hash.0).map_to_mm(|e| EnableLightningError::HashError(e.to_string()))?,
-    );
-    let (channel_manager_blockhash, channel_manager) = {
-        let user_config = conf.clone().into();
-        if let Ok(mut f) = File::open(persister.manager_path()) {
-            let mut channel_monitor_mut_references = Vec::new();
-            for (_, channel_monitor) in channelmonitors.iter_mut() {
-                channel_monitor_mut_references.push(channel_monitor);
-            }
-            // Read ChannelManager data from the file
-            let read_args = ChannelManagerReadArgs::new(
-                keys_manager.clone(),
-                fee_estimator.clone(),
-                chain_monitor.clone(),
-                broadcaster.clone(),
-                logger.clone(),
-                user_config,
-                channel_monitor_mut_references,
-            );
-            <(BlockHash, ChannelManager)>::read(&mut f, read_args)
-                .map_to_mm(|e| EnableLightningError::IOError(e.to_string()))?
-        } else {
-            // Initialize the ChannelManager to starting a new node without history
-            let chain_params = ChainParameters {
-                network,
-                best_block: BestBlock::new(best_block_hash, best_block.height as u32),
-            };
-            let new_channel_manager = channelmanager::ChannelManager::new(
-                fee_estimator.clone(),
-                chain_monitor.clone(),
-                broadcaster.clone(),
-                logger.clone(),
-                keys_manager.clone(),
-                user_config,
-                chain_params,
-            );
-            (best_block_hash, new_channel_manager)
-        }
-    };
-
-    let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
-
-    // Sync ChannelMonitors and ChannelManager to chain tip if the node is restarting and has open channels
-    if channel_manager_blockhash != best_block_hash {
-        process_txs_unconfirmations(
-            filter.clone().unwrap().clone(),
-            chain_monitor.clone(),
-            channel_manager.clone(),
-        )
-        .await;
-        process_txs_confirmations(
-            // It's safe to use unwrap here for now until implementing Native Client for Lightning
-            filter.clone().unwrap().clone(),
-            rpc_client.clone(),
-            chain_monitor.clone(),
-            channel_manager.clone(),
-            best_header.block_height(),
-        )
-        .await;
-        update_best_block(chain_monitor.clone(), channel_manager.clone(), best_header).await;
-    }
-
-    // Give ChannelMonitors to ChainMonitor
-    for (_, channel_monitor) in channelmonitors.drain(..) {
-        let funding_outpoint = channel_monitor.get_funding_txo().0;
-        chain_monitor
-            .watch_channel(funding_outpoint, channel_monitor)
-            .map_to_mm(|e| EnableLightningError::IOError(format!("{:?}", e)))?;
-    }
 
     // Initialize the NetGraphMsgHandler. This is used for providing routes to send payments over
     let network_graph = Arc::new(persister.get_network_graph(network).await?);
@@ -389,6 +397,16 @@ pub async fn start_lightning(
         None::<Arc<dyn Access + Send + Sync>>,
         logger.clone(),
     ));
+
+    // Initialize the ChannelManager
+    let (chain_monitor, channel_manager) = init_channel_manager(
+        platform_fields.clone(),
+        logger.clone(),
+        persister.clone(),
+        keys_manager.clone(),
+        conf.clone(),
+    )
+    .await?;
 
     // Initialize the PeerManager
     let peer_manager = init_peer_manager(
@@ -401,23 +419,13 @@ pub async fn start_lightning(
     )
     .await?;
 
-    // Update best block whenever there's a new chain tip or a block has been newly disconnected
-    spawn(ln_best_block_update_loop(
-        // It's safe to use unwrap here for now until implementing Native Client for Lightning
-        filter.clone().unwrap(),
-        chain_monitor.clone(),
-        channel_manager.clone(),
-        rpc_client.clone(),
-        best_block,
-    ));
-
     let inbound_payments = Arc::new(PaMutex::new(HashMap::new()));
     let outbound_payments = Arc::new(PaMutex::new(HashMap::new()));
 
     // Initialize the event handler
     let event_handler = Arc::new(ln_events::LightningEventHandler::new(
         // It's safe to use unwrap here for now until implementing Native Client for Lightning
-        filter.clone().unwrap(),
+        platform_fields.clone(),
         channel_manager.clone(),
         keys_manager.clone(),
         inbound_payments.clone(),
