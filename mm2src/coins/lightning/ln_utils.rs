@@ -1,6 +1,6 @@
 use super::*;
 use crate::lightning::ln_conf::{LightningCoinConf, LightningProtocolConf};
-use crate::lightning::ln_connections::{connect_to_nodes_loop, ln_p2p_loop};
+use crate::lightning::ln_p2p::{connect_to_nodes_loop, init_peer_manager, ln_node_announcement_loop};
 use crate::utxo::rpc_clients::{electrum_script_hash, BestBlock as RpcBestBlock, ElectrumBlockHeader, ElectrumClient,
                                ElectrumNonce, UtxoRpcError};
 use crate::utxo::utxo_standard::UtxoStandardCoin;
@@ -11,7 +11,6 @@ use bitcoin::consensus::encode::deserialize;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin_hashes::{sha256d, Hash};
 use common::executor::{spawn, Timer};
-use common::ip_addr::fetch_external_ip;
 use common::jsonrpc_client::JsonRpcErrorType;
 use common::log;
 use common::log::LogState;
@@ -21,33 +20,25 @@ use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager
 use lightning::chain::{chainmonitor, Access, BestBlock, Confirm, Watch};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager};
-use lightning::ln::msgs::NetAddress;
-use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
 use lightning::routing::scoring::Scorer;
 use lightning::util::ser::ReadableArgs;
 use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::DefaultRouter;
-use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::storage::{FileSystemStorage, NodesAddressesMap};
 use lightning_persister::LightningPersister;
 use parking_lot::Mutex as PaMutex;
-use rand::RngCore;
 use rpc::v1::types::H256;
-use secp256k1::SecretKey;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::File;
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use tokio::net::TcpListener;
 
 const CHECK_FOR_NEW_BEST_BLOCK_INTERVAL: u64 = 60;
-const BROADCAST_NODE_ANNOUNCEMENT_INTERVAL: u64 = 600;
 const NETWORK_GRAPH_PERSIST_INTERVAL: u64 = 600;
 const SCORER_PERSIST_INTERVAL: u64 = 600;
 
@@ -62,40 +53,9 @@ pub type ChainMonitor = chainmonitor::ChainMonitor<
 
 pub type ChannelManager = SimpleArcChannelManager<ChainMonitor, UtxoStandardCoin, PlatformFields, LogState>;
 
-pub type PeerManager = SimpleArcPeerManager<
-    SocketDescriptor,
-    ChainMonitor,
-    UtxoStandardCoin,
-    PlatformFields,
-    dyn Access + Send + Sync,
-    LogState,
->;
-
-pub type InvoicePayer<E> = payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<Mutex<Scorer>>, Arc<LogState>, E>;
-
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<LogState>>;
 
-type NetworkGossip = NetGraphMsgHandler<Arc<NetworkGraph>, Arc<dyn Access + Send + Sync>, Arc<LogState>>;
-
-// TODO: add TOR address option
-fn netaddress_from_ipaddr(addr: IpAddr, port: u16) -> Vec<NetAddress> {
-    if addr == Ipv4Addr::new(0, 0, 0, 0) || addr == Ipv4Addr::new(127, 0, 0, 1) {
-        return Vec::new();
-    }
-    let mut addresses = Vec::new();
-    let address = match addr {
-        IpAddr::V4(addr) => NetAddress::IPv4 {
-            addr: u32::from(addr).to_be_bytes(),
-            port,
-        },
-        IpAddr::V6(addr) => NetAddress::IPv6 {
-            addr: u128::from(addr).to_be_bytes(),
-            port,
-        },
-    };
-    addresses.push(address);
-    addresses
-}
+pub type InvoicePayer<E> = payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<Mutex<Scorer>>, Arc<LogState>, E>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LightningParams {
@@ -304,45 +264,6 @@ async fn persist_scorer_loop(persister: Arc<LightningPersister>, scorer: Arc<Mut
     }
 }
 
-async fn init_peer_manager(
-    ctx: MmArc,
-    listening_port: u16,
-    channel_manager: Arc<ChannelManager>,
-    network_gossip: Arc<NetworkGossip>,
-    node_secret: SecretKey,
-    logger: Arc<LogState>,
-) -> EnableLightningResult<Arc<PeerManager>> {
-    // The set (possibly empty) of socket addresses on which this node accepts incoming connections.
-    // If the user wishes to preserve privacy, addresses should likely contain only Tor Onion addresses.
-    let listening_addr = myipaddr(ctx).await.map_to_mm(EnableLightningError::InvalidAddress)?;
-    // If the listening port is used start_lightning should return an error early
-    let listener = TcpListener::bind(format!("{}:{}", listening_addr, listening_port))
-        .await
-        .map_to_mm(|e| EnableLightningError::IOError(e.to_string()))?;
-
-    // ephemeral_random_data is used to derive per-connection ephemeral keys
-    let mut ephemeral_bytes = [0; 32];
-    rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
-    let lightning_msg_handler = MessageHandler {
-        chan_handler: channel_manager,
-        route_handler: network_gossip,
-    };
-
-    // IgnoringMessageHandler is used as custom message types (experimental and application-specific messages) is not needed
-    let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
-        lightning_msg_handler,
-        node_secret,
-        &ephemeral_bytes,
-        logger,
-        Arc::new(IgnoringMessageHandler {}),
-    ));
-
-    // Initialize p2p networking
-    spawn(ln_p2p_loop(peer_manager.clone(), listener));
-
-    Ok(peer_manager)
-}
-
 async fn get_open_channels_nodes_addresses(
     persister: Arc<LightningPersister>,
     channel_manager: Arc<ChannelManager>,
@@ -373,10 +294,9 @@ pub async fn start_lightning(
         ));
     }
 
-    let network = protocol_conf.network.clone().into();
     let platform_fields = Arc::new(PlatformFields::new(
         platform_coin.clone(),
-        protocol_conf.network,
+        protocol_conf.network.clone(),
         protocol_conf.confirmations,
     ));
 
@@ -390,7 +310,7 @@ pub async fn start_lightning(
     let keys_manager = init_keys_manager(ctx)?;
 
     // Initialize the NetGraphMsgHandler. This is used for providing routes to send payments over
-    let network_graph = Arc::new(persister.get_network_graph(network).await?);
+    let network_graph = Arc::new(persister.get_network_graph(protocol_conf.network.into()).await?);
     spawn(persist_network_graph_loop(persister.clone(), network_graph.clone()));
     let network_gossip = Arc::new(NetGraphMsgHandler::new(
         network_graph.clone(),
@@ -456,7 +376,7 @@ pub async fn start_lightning(
     // Start Background Processing. Runs tasks periodically in the background to keep LN node operational.
     // InvoicePayer will act as our event handler as it handles some of the payments related events before
     // delegating it to LightningEventHandler.
-    let background_processor = BackgroundProcessor::start(
+    let background_processor = Arc::new(BackgroundProcessor::start(
         persist_channel_manager_callback,
         invoice_payer.clone(),
         chain_monitor.clone(),
@@ -464,7 +384,7 @@ pub async fn start_lightning(
         Some(network_gossip),
         peer_manager.clone(),
         logger,
-    );
+    ));
 
     // If channel_nodes_data file exists, read channels nodes data from disk and reconnect to channel nodes/peers if possible.
     let open_channels_nodes = Arc::new(PaMutex::new(
@@ -484,7 +404,7 @@ pub async fn start_lightning(
         platform_fields,
         conf,
         peer_manager,
-        background_processor: Arc::new(background_processor),
+        background_processor,
         channel_manager,
         chain_monitor,
         keys_manager,
@@ -840,32 +760,5 @@ async fn ln_best_block_update_loop(
             update_best_block(chain_monitor.clone(), channel_manager.clone(), best_header).await;
         }
         Timer::sleep(CHECK_FOR_NEW_BEST_BLOCK_INTERVAL as f64).await;
-    }
-}
-
-async fn ln_node_announcement_loop(
-    channel_manager: Arc<ChannelManager>,
-    node_name: [u8; 32],
-    node_color: [u8; 3],
-    port: u16,
-) {
-    loop {
-        // Right now if the node is behind NAT the external ip is fetched on every loop
-        // If the node does not announce a public IP, it will not be displayed on the network graph,
-        // and other nodes will not be able to open a channel with it. But it can open channels with other nodes.
-        let addresses = match fetch_external_ip().await {
-            Ok(ip) => {
-                log::debug!("Fetch real IP successfully: {}:{}", ip, port);
-                netaddress_from_ipaddr(ip, port)
-            },
-            Err(e) => {
-                log::error!("Error while fetching external ip for node announcement: {}", e);
-                Timer::sleep(BROADCAST_NODE_ANNOUNCEMENT_INTERVAL as f64).await;
-                continue;
-            },
-        };
-        channel_manager.broadcast_node_announcement(node_color, node_name, addresses);
-
-        Timer::sleep(BROADCAST_NODE_ANNOUNCEMENT_INTERVAL as f64).await;
     }
 }

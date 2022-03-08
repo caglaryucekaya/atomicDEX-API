@@ -35,7 +35,6 @@ use lightning_invoice::Invoice;
 use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, PlatformCoinConfirmations};
-use ln_connections::{connect_to_node, ConnectToNodeRes};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
                 ConnectToNodeError, ConnectToNodeResult, EnableLightningError, EnableLightningResult,
                 GenerateInvoiceError, GenerateInvoiceResult, GetChannelDetailsError, GetChannelDetailsResult,
@@ -43,8 +42,9 @@ use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelErr
                 ListPaymentsError, ListPaymentsResult, OpenChannelError, OpenChannelResult, SendPaymentError,
                 SendPaymentResult};
 use ln_events::LightningEventHandler;
+use ln_p2p::{connect_to_node, ConnectToNodeRes, PeerManager};
 use ln_serialization::{InvoiceForRPC, NodeAddress, PublicKeyForRPC};
-use ln_utils::{ChainMonitor, ChannelManager, InvoicePayer, PeerManager};
+use ln_utils::{ChainMonitor, ChannelManager, InvoicePayer};
 use parking_lot::Mutex as PaMutex;
 use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json};
 use script::{Builder, TransactionInputSigner};
@@ -59,9 +59,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 pub mod ln_conf;
-mod ln_connections;
 pub mod ln_errors;
 mod ln_events;
+mod ln_p2p;
 mod ln_rpc;
 mod ln_serialization;
 pub mod ln_utils;
