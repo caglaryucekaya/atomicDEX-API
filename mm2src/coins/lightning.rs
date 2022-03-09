@@ -8,8 +8,6 @@ use crate::{BalanceFut, CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySy
             ValidatePaymentInput, WithdrawError, WithdrawFut, WithdrawRequest};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
-use bitcoin::blockdata::script::Script;
-use bitcoin::hash_types::Txid;
 use bitcoin::hashes::Hash;
 use bitcoin_hashes::sha256::Hash as Sha256;
 use chain::TransactionOutput;
@@ -25,7 +23,6 @@ use keys::{AddressHashEnum, KeyPair};
 use lightning::chain::channelmonitor::Balance;
 use lightning::chain::keysinterface::KeysInterface;
 use lightning::chain::keysinterface::KeysManager;
-use lightning::chain::WatchedOutput;
 use lightning::ln::channelmanager::{ChannelDetails, MIN_FINAL_CLTV_EXPIRY};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::util::config::UserConfig;
@@ -43,6 +40,7 @@ use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelErr
                 SendPaymentResult};
 use ln_events::LightningEventHandler;
 use ln_p2p::{connect_to_node, ConnectToNodeRes, PeerManager};
+use ln_platform::Platform;
 use ln_serialization::{InvoiceForRPC, NodeAddress, PublicKeyForRPC};
 use ln_utils::{ChainMonitor, ChannelManager, InvoicePayer};
 use parking_lot::Mutex as PaMutex;
@@ -62,63 +60,12 @@ pub mod ln_conf;
 pub mod ln_errors;
 mod ln_events;
 mod ln_p2p;
-mod ln_rpc;
+mod ln_platform;
 mod ln_serialization;
 pub mod ln_utils;
 
 type PaymentsMap = HashMap<PaymentHash, PaymentInfo>;
 type PaymentsMapShared = Arc<PaMutex<PaymentsMap>>;
-
-pub struct PlatformFields {
-    pub platform_coin: UtxoStandardCoin,
-    /// Main/testnet/signet/regtest Needed for lightning node to know which network to connect to
-    pub network: BlockchainNetwork,
-    // Default fees to and confirmation targets to be used for FeeEstimator. Default fees are used when the call for
-    // estimate_fee_sat fails.
-    pub default_fees_and_confirmations: PlatformCoinConfirmations,
-    // This cache stores the transactions that the LN node has interest in.
-    pub registered_txs: PaMutex<HashMap<Txid, HashSet<Script>>>,
-    // This cache stores the outputs that the LN node has interest in.
-    pub registered_outputs: PaMutex<Vec<WatchedOutput>>,
-    // This cache stores transactions to be broadcasted once the other node accepts the channel
-    pub unsigned_funding_txs: PaMutex<HashMap<[u8; 32], TransactionInputSigner>>,
-}
-
-impl PlatformFields {
-    pub fn new(
-        platform_coin: UtxoStandardCoin,
-        network: BlockchainNetwork,
-        default_fees_and_confirmations: PlatformCoinConfirmations,
-    ) -> Self {
-        PlatformFields {
-            platform_coin,
-            network,
-            default_fees_and_confirmations,
-            registered_txs: PaMutex::new(HashMap::new()),
-            registered_outputs: PaMutex::new(Vec::new()),
-            unsigned_funding_txs: PaMutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn add_tx(&self, txid: &Txid, script_pubkey: &Script) {
-        let mut registered_txs = self.registered_txs.lock();
-        match registered_txs.get_mut(txid) {
-            Some(h) => {
-                h.insert(script_pubkey.clone());
-            },
-            None => {
-                let mut script_pubkeys = HashSet::new();
-                script_pubkeys.insert(script_pubkey.clone());
-                registered_txs.insert(*txid, script_pubkeys);
-            },
-        }
-    }
-
-    pub fn add_output(&self, output: WatchedOutput) {
-        let mut registered_outputs = self.registered_outputs.lock();
-        registered_outputs.push(output);
-    }
-}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -139,7 +86,7 @@ pub struct PaymentInfo {
 
 #[derive(Clone)]
 pub struct LightningCoin {
-    pub platform_fields: Arc<PlatformFields>,
+    pub platform: Arc<Platform>,
     pub conf: LightningCoinConf,
     /// The lightning node peer manager that takes care of connecting to peers, etc..
     pub peer_manager: Arc<PeerManager>,
@@ -170,7 +117,7 @@ impl fmt::Debug for LightningCoin {
 }
 
 impl LightningCoin {
-    fn platform_coin(&self) -> &UtxoStandardCoin { &self.platform_fields.platform_coin }
+    fn platform_coin(&self) -> &UtxoStandardCoin { &self.platform.coin }
 
     fn my_node_id(&self) -> String { self.channel_manager.get_our_node_id().to_string() }
 
@@ -668,7 +615,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
     .await?;
 
     {
-        let mut unsigned_funding_txs = ln_coin.platform_fields.unsigned_funding_txs.lock();
+        let mut unsigned_funding_txs = ln_coin.platform.unsigned_funding_txs.lock();
         unsigned_funding_txs.insert(temp_channel_id, unsigned);
     }
 
@@ -817,7 +764,7 @@ pub async fn generate_invoice(
                 node_pubkey
             ));
     }
-    let network = ln_coin.platform_fields.network.clone().into();
+    let network = ln_coin.platform.network.clone().into();
     let invoice = create_invoice_from_channelmanager(
         &ln_coin.channel_manager,
         ln_coin.keys_manager,

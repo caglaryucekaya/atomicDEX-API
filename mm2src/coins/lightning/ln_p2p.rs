@@ -19,14 +19,8 @@ const BROADCAST_NODE_ANNOUNCEMENT_INTERVAL: u64 = 600;
 
 type NetworkGossip = NetGraphMsgHandler<Arc<NetworkGraph>, Arc<dyn Access + Send + Sync>, Arc<LogState>>;
 
-pub type PeerManager = SimpleArcPeerManager<
-    SocketDescriptor,
-    ChainMonitor,
-    UtxoStandardCoin,
-    PlatformFields,
-    dyn Access + Send + Sync,
-    LogState,
->;
+pub type PeerManager =
+    SimpleArcPeerManager<SocketDescriptor, ChainMonitor, Platform, Platform, dyn Access + Send + Sync, LogState>;
 
 #[derive(Display)]
 pub enum ConnectToNodeRes {

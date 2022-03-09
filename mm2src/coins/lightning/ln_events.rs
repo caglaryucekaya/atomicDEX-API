@@ -16,7 +16,7 @@ use std::sync::Arc;
 use utxo_signer::with_key_pair::sign_tx;
 
 pub struct LightningEventHandler {
-    filter: Arc<PlatformFields>,
+    platform: Arc<Platform>,
     channel_manager: Arc<ChannelManager>,
     keys_manager: Arc<KeysManager>,
     inbound_payments: PaymentsMapShared,
@@ -49,7 +49,7 @@ impl EventHandler for LightningEventHandler {
             Event::PaymentForwarded { fee_earned_msat, claim_from_onchain_tx } => log::info!(
                     "Recieved a fee of {} milli-satoshis for a successfully forwarded payment through our {} lightning node. Was the forwarded HTLC claimed by our counterparty via an on-chain transaction?: {}",
                     fee_earned_msat.unwrap_or_default(),
-                    self.filter.platform_coin.ticker(),
+                    self.platform.coin.ticker(),
                     claim_from_onchain_tx,
                 ),
             // Todo: Use storage to store channels history
@@ -92,11 +92,11 @@ impl EventHandler for LightningEventHandler {
 fn sign_funding_transaction(
     temp_channel_id: [u8; 32],
     output_script: &Script,
-    filter: Arc<PlatformFields>,
+    platform: Arc<Platform>,
 ) -> OpenChannelResult<Transaction> {
-    let coin = &filter.platform_coin;
+    let coin = &platform.coin;
     let mut unsigned = {
-        let unsigned_funding_txs = filter.unsigned_funding_txs.lock();
+        let unsigned_funding_txs = platform.unsigned_funding_txs.lock();
         unsigned_funding_txs
             .get(&temp_channel_id)
             .ok_or_else(|| {
@@ -126,14 +126,14 @@ fn sign_funding_transaction(
 
 impl LightningEventHandler {
     pub fn new(
-        filter: Arc<PlatformFields>,
+        platform: Arc<Platform>,
         channel_manager: Arc<ChannelManager>,
         keys_manager: Arc<KeysManager>,
         inbound_payments: PaymentsMapShared,
         outbound_payments: PaymentsMapShared,
     ) -> Self {
         LightningEventHandler {
-            filter,
+            platform,
             channel_manager,
             keys_manager,
             inbound_payments,
@@ -146,7 +146,7 @@ impl LightningEventHandler {
             "Handling FundingGenerationReady event for temporary_channel_id: {}",
             hex::encode(temporary_channel_id)
         );
-        let funding_tx = match sign_funding_transaction(temporary_channel_id, output_script, self.filter.clone()) {
+        let funding_tx = match sign_funding_transaction(temporary_channel_id, output_script, self.platform.clone()) {
             Ok(tx) => tx,
             Err(e) => {
                 log::error!(
@@ -259,7 +259,7 @@ impl LightningEventHandler {
 
     fn handle_spendable_outputs(&self, outputs: &[SpendableOutputDescriptor]) {
         log::info!("Handling SpendableOutputs event!");
-        let platform_coin = &self.filter.platform_coin;
+        let platform_coin = &self.platform.coin;
         // Todo: add support for Hardware wallets for funding transactions and spending spendable outputs (channel closing transactions)
         let my_address = match platform_coin.as_ref().derivation_method.iguana_or_err() {
             Ok(addr) => addr,
@@ -269,7 +269,7 @@ impl LightningEventHandler {
             },
         };
         let change_destination_script = Builder::build_witness_script(&my_address.hash).to_bytes().take().into();
-        let feerate_sat_per_1000_weight = self.filter.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
+        let feerate_sat_per_1000_weight = self.platform.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
         let output_descriptors = &outputs.iter().collect::<Vec<_>>();
         let spending_tx = match self.keys_manager.spend_spendable_outputs(
             output_descriptors,
@@ -284,6 +284,6 @@ impl LightningEventHandler {
                 return;
             },
         };
-        platform_coin.broadcast_transaction(&spending_tx);
+        self.platform.broadcast_transaction(&spending_tx);
     }
 }
