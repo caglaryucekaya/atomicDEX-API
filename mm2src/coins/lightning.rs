@@ -1,4 +1,12 @@
-use super::{lp_coinfind_or_err, MmCoinEnum};
+pub mod ln_conf;
+pub mod ln_errors;
+mod ln_events;
+mod ln_p2p;
+mod ln_platform;
+mod ln_serialization;
+mod ln_utils;
+
+use super::{lp_coinfind_or_err, DerivationMethod, MmCoinEnum};
 use crate::utxo::rpc_clients::UtxoRpcClientEnum;
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, UtxoTxBuilder};
 use crate::utxo::{sat_from_big_decimal, BlockchainNetwork, FeePolicy, UtxoCommonOps, UtxoTxGenerationOps};
@@ -11,8 +19,9 @@ use bigdecimal::BigDecimal;
 use bitcoin::hashes::Hash;
 use bitcoin_hashes::sha256::Hash as Sha256;
 use chain::TransactionOutput;
+use common::executor::spawn;
 use common::ip_addr::myipaddr;
-use common::log::LogOnError;
+use common::log::{LogOnError, LogState};
 use common::mm_ctx::MmArc;
 use common::mm_error::prelude::*;
 use common::mm_number::MmNumber;
@@ -23,15 +32,19 @@ use keys::{AddressHashEnum, KeyPair};
 use lightning::chain::channelmonitor::Balance;
 use lightning::chain::keysinterface::KeysInterface;
 use lightning::chain::keysinterface::KeysManager;
+use lightning::chain::Access;
 use lightning::ln::channelmanager::{ChannelDetails, MIN_FINAL_CLTV_EXPIRY};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
+use lightning::routing::scoring::Scorer;
 use lightning::util::config::UserConfig;
 use lightning_background_processor::BackgroundProcessor;
-use lightning_invoice::utils::create_invoice_from_channelmanager;
+use lightning_invoice::payment;
+use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
 use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared};
 use lightning_persister::LightningPersister;
-use ln_conf::{ChannelOptions, LightningCoinConf, PlatformCoinConfirmations};
+use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
                 ConnectToNodeError, ConnectToNodeResult, EnableLightningError, EnableLightningResult,
                 GenerateInvoiceError, GenerateInvoiceResult, GetChannelDetailsError, GetChannelDetailsResult,
@@ -42,7 +55,7 @@ use ln_events::LightningEventHandler;
 use ln_p2p::{connect_to_node, ConnectToNodeRes, PeerManager};
 use ln_platform::Platform;
 use ln_serialization::{InvoiceForRPC, NodeAddress, PublicKeyForRPC};
-use ln_utils::{ChainMonitor, ChannelManager, InvoicePayer};
+use ln_utils::{ChainMonitor, ChannelManager};
 use parking_lot::Mutex as PaMutex;
 use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json};
 use script::{Builder, TransactionInputSigner};
@@ -54,35 +67,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-pub mod ln_conf;
-pub mod ln_errors;
-mod ln_events;
-mod ln_p2p;
-mod ln_platform;
-mod ln_serialization;
-pub mod ln_utils;
-
+type Router = DefaultRouter<Arc<NetworkGraph>, Arc<LogState>>;
+type InvoicePayer<E> = payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<Mutex<Scorer>>, Arc<LogState>, E>;
 type PaymentsMap = HashMap<PaymentHash, PaymentInfo>;
 type PaymentsMapShared = Arc<PaMutex<PaymentsMap>>;
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HTLCStatus {
-    Pending,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Clone)]
-pub struct PaymentInfo {
-    pub preimage: Option<PaymentPreimage>,
-    pub secret: Option<PaymentSecret>,
-    pub status: HTLCStatus,
-    pub amt_msat: Option<u64>,
-    pub fee_paid_msat: Option<u64>,
-}
 
 #[derive(Clone)]
 pub struct LightningCoin {
@@ -114,6 +104,23 @@ pub struct LightningCoin {
 
 impl fmt::Debug for LightningCoin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "LightningCoin {{ conf: {:?} }}", self.conf) }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HTLCStatus {
+    Pending,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone)]
+pub struct PaymentInfo {
+    pub preimage: Option<PaymentPreimage>,
+    pub secret: Option<PaymentSecret>,
+    pub status: HTLCStatus,
+    pub amt_msat: Option<u64>,
+    pub fee_paid_msat: Option<u64>,
 }
 
 impl LightningCoin {
@@ -477,6 +484,165 @@ impl MmCoin for LightningCoin {
 
     // Todo: Implement this when implementing order matching for lightning as it's is used only for order matching
     fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { unimplemented!() }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LightningParams {
+    // The listening port for the p2p LN node
+    pub listening_port: u16,
+    // Printable human-readable string to describe this node to other users.
+    pub node_name: [u8; 32],
+    // Node's RGB color. This is used for showing the node in a network graph with the desired color.
+    pub node_color: [u8; 3],
+    // Invoice Payer is initialized while starting the lightning node, and it requires the number of payment retries that
+    // it should do before considering a payment failed or partially failed. If not provided the number of retries will be 5
+    // as this is a good default value.
+    pub payment_retries: Option<usize>,
+    // Node's backup path for channels and other data that requires backup.
+    pub backup_path: Option<String>,
+}
+
+pub async fn start_lightning(
+    ctx: &MmArc,
+    platform_coin: UtxoStandardCoin,
+    protocol_conf: LightningProtocolConf,
+    conf: LightningCoinConf,
+    params: LightningParams,
+) -> EnableLightningResult<LightningCoin> {
+    // Todo: add support for Hardware wallets for funding transactions and spending spendable outputs (channel closing transactions)
+    if let DerivationMethod::HDWallet(_) = platform_coin.as_ref().derivation_method {
+        return MmError::err(EnableLightningError::UnsupportedMode(
+            "'start_lightning'".into(),
+            "iguana".into(),
+        ));
+    }
+
+    let platform = Arc::new(Platform::new(
+        platform_coin.clone(),
+        protocol_conf.network.clone(),
+        protocol_conf.confirmations,
+    ));
+
+    // Initialize the Logger
+    let logger = ctx.log.0.clone();
+
+    // Initialize Persister
+    let persister = ln_utils::init_persister(ctx, conf.ticker.clone(), params.backup_path).await?;
+
+    // Initialize the KeysManager
+    let keys_manager = ln_utils::init_keys_manager(ctx)?;
+
+    // Initialize the NetGraphMsgHandler. This is used for providing routes to send payments over
+    let network_graph = Arc::new(persister.get_network_graph(protocol_conf.network.into()).await?);
+    spawn(ln_utils::persist_network_graph_loop(
+        persister.clone(),
+        network_graph.clone(),
+    ));
+    let network_gossip = Arc::new(NetGraphMsgHandler::new(
+        network_graph.clone(),
+        None::<Arc<dyn Access + Send + Sync>>,
+        logger.clone(),
+    ));
+
+    // Initialize the ChannelManager
+    let (chain_monitor, channel_manager) = ln_utils::init_channel_manager(
+        platform.clone(),
+        logger.clone(),
+        persister.clone(),
+        keys_manager.clone(),
+        conf.clone().into(),
+    )
+    .await?;
+
+    // Initialize the PeerManager
+    let peer_manager = ln_p2p::init_peer_manager(
+        ctx.clone(),
+        params.listening_port,
+        channel_manager.clone(),
+        network_gossip.clone(),
+        keys_manager.get_node_secret(),
+        logger.clone(),
+    )
+    .await?;
+
+    let inbound_payments = Arc::new(PaMutex::new(HashMap::new()));
+    let outbound_payments = Arc::new(PaMutex::new(HashMap::new()));
+
+    // Initialize the event handler
+    let event_handler = Arc::new(ln_events::LightningEventHandler::new(
+        // It's safe to use unwrap here for now until implementing Native Client for Lightning
+        platform.clone(),
+        channel_manager.clone(),
+        keys_manager.clone(),
+        inbound_payments.clone(),
+        outbound_payments.clone(),
+    ));
+
+    // Initialize routing Scorer
+    let scorer = Arc::new(Mutex::new(persister.get_scorer().await?));
+    spawn(ln_utils::persist_scorer_loop(persister.clone(), scorer.clone()));
+
+    // Create InvoicePayer
+    let router = DefaultRouter::new(network_graph, logger.clone());
+    let invoice_payer = Arc::new(InvoicePayer::new(
+        channel_manager.clone(),
+        router,
+        scorer,
+        logger.clone(),
+        event_handler,
+        payment::RetryAttempts(params.payment_retries.unwrap_or(5)),
+    ));
+
+    // Persist ChannelManager
+    // Note: if the ChannelManager is not persisted properly to disk, there is risk of channels force closing the next time LN starts up
+    let channel_manager_persister = persister.clone();
+    let persist_channel_manager_callback =
+        move |node: &ChannelManager| channel_manager_persister.persist_manager(&*node);
+
+    // Start Background Processing. Runs tasks periodically in the background to keep LN node operational.
+    // InvoicePayer will act as our event handler as it handles some of the payments related events before
+    // delegating it to LightningEventHandler.
+    let background_processor = Arc::new(BackgroundProcessor::start(
+        persist_channel_manager_callback,
+        invoice_payer.clone(),
+        chain_monitor.clone(),
+        channel_manager.clone(),
+        Some(network_gossip),
+        peer_manager.clone(),
+        logger,
+    ));
+
+    // If channel_nodes_data file exists, read channels nodes data from disk and reconnect to channel nodes/peers if possible.
+    let open_channels_nodes = Arc::new(PaMutex::new(
+        ln_utils::get_open_channels_nodes_addresses(persister.clone(), channel_manager.clone()).await?,
+    ));
+    spawn(ln_p2p::connect_to_nodes_loop(
+        open_channels_nodes.clone(),
+        peer_manager.clone(),
+    ));
+
+    // Broadcast Node Announcement
+    spawn(ln_p2p::ln_node_announcement_loop(
+        channel_manager.clone(),
+        params.node_name,
+        params.node_color,
+        params.listening_port,
+    ));
+
+    Ok(LightningCoin {
+        platform,
+        conf,
+        peer_manager,
+        background_processor,
+        channel_manager,
+        chain_monitor,
+        keys_manager,
+        invoice_payer,
+        persister,
+        inbound_payments,
+        outbound_payments,
+        open_channels_nodes,
+    })
 }
 
 #[derive(Deserialize)]
