@@ -42,7 +42,7 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
-use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared};
+use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -185,6 +185,9 @@ impl LightningCoin {
             fee_paid_msat: None,
         }))
     }
+
+    // Todo: implement GetHistoryCoinType instead
+    fn storage_ticker(&self) -> String { self.ticker().replace('-', "_") }
 }
 
 #[async_trait]
@@ -702,7 +705,7 @@ pub struct OpenChannelRequest {
 
 #[derive(Serialize)]
 pub struct OpenChannelResponse {
-    temporary_channel_id: H256Json,
+    rpc_channel_id: u64,
     node_address: NodeAddress,
 }
 
@@ -773,16 +776,19 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         user_config.own_channel_config.our_htlc_minimum_msat = min;
     }
 
-    let temp_channel_id = async_blocking(move || {
+    let storage_ticker = ln_coin.storage_ticker();
+    let rpc_channel_id = ln_coin.persister.get_number_of_channels_in_sql(&storage_ticker).await? as u64;
+
+    async_blocking(move || {
         channel_manager
-            .create_channel(node_pubkey, amount_in_sat, push_msat, 1, Some(user_config))
+            .create_channel(node_pubkey, amount_in_sat, push_msat, rpc_channel_id, Some(user_config))
             .map_to_mm(|e| OpenChannelError::FailureToOpenChannel(node_pubkey.to_string(), format!("{:?}", e)))
     })
     .await?;
 
     {
         let mut unsigned_funding_txs = ln_coin.platform.unsigned_funding_txs.lock();
-        unsigned_funding_txs.insert(temp_channel_id, unsigned);
+        unsigned_funding_txs.insert(rpc_channel_id, unsigned);
     }
 
     // Saving node data to reconnect to it on restart
@@ -793,7 +799,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         .await?;
 
     Ok(OpenChannelResponse {
-        temporary_channel_id: temp_channel_id.into(),
+        rpc_channel_id,
         node_address: req.node_address,
     })
 }
@@ -806,6 +812,7 @@ pub struct ListChannelsRequest {
 #[derive(Serialize)]
 pub struct ChannelDetailsForRPC {
     pub channel_id: H256Json,
+    pub rpc_channel_id: u64,
     pub counterparty_node_id: PublicKeyForRPC,
     pub funding_tx: Option<H256Json>,
     pub funding_tx_output_index: Option<u16>,
@@ -829,6 +836,7 @@ impl From<ChannelDetails> for ChannelDetailsForRPC {
     fn from(details: ChannelDetails) -> ChannelDetailsForRPC {
         ChannelDetailsForRPC {
             channel_id: details.channel_id.into(),
+            rpc_channel_id: details.user_channel_id,
             counterparty_node_id: PublicKeyForRPC(details.counterparty.node_id),
             funding_tx: details
                 .funding_txo
@@ -870,7 +878,7 @@ pub async fn list_channels(ctx: MmArc, req: ListChannelsRequest) -> ListChannels
 #[derive(Deserialize)]
 pub struct GetChannelDetailsRequest {
     pub coin: String,
-    pub channel_id: H256Json,
+    pub rpc_channel_id: u64,
 }
 
 #[derive(Serialize)]
@@ -891,8 +899,8 @@ pub async fn get_channel_details(
         .channel_manager
         .list_channels()
         .into_iter()
-        .find(|chan| chan.channel_id == req.channel_id.0)
-        .ok_or(GetChannelDetailsError::NoSuchChannel(req.channel_id))?
+        .find(|chan| chan.user_channel_id == req.rpc_channel_id)
+        .ok_or(GetChannelDetailsError::NoSuchChannel(req.rpc_channel_id))?
         .into();
 
     Ok(GetChannelDetailsResponse { channel_details })

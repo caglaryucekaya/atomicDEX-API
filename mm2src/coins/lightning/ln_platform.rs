@@ -202,7 +202,7 @@ pub struct Platform {
     // This cache stores the outputs that the LN node has interest in.
     pub registered_outputs: PaMutex<Vec<WatchedOutput>>,
     // This cache stores transactions to be broadcasted once the other node accepts the channel
-    pub unsigned_funding_txs: PaMutex<HashMap<[u8; 32], TransactionInputSigner>>,
+    pub unsigned_funding_txs: PaMutex<HashMap<u64, TransactionInputSigner>>,
 }
 
 impl Platform {

@@ -44,4 +44,6 @@ pub trait SqlStorage {
     async fn is_sql_initialized(&self, for_coin: &str) -> Result<bool, Self::Error>;
 
     async fn add_channel_to_history(&self, for_coin: &str, channel_details: ChannelDetails) -> Result<(), Self::Error>;
+
+    async fn get_number_of_channels_in_sql(&self, for_coin: &str) -> Result<u32, Self::Error>;
 }

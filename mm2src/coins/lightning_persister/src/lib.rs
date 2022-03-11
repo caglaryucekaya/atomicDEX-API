@@ -117,6 +117,15 @@ fn insert_channel_in_history_sql(for_coin: &str) -> Result<String, SqlError> {
     Ok(sql)
 }
 
+fn get_num_channel_rows_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "SELECT COUNT(*) FROM ".to_owned() + &table_name + ";";
+
+    Ok(sql)
+}
+
 impl LightningPersister {
     /// Initialize a new LightningPersister and set the path to the individual channels'
     /// files.
@@ -527,16 +536,29 @@ impl SqlStorage for LightningPersister {
         })
         .await
     }
+
+    async fn get_number_of_channels_in_sql(&self, for_coin: &str) -> Result<u32, Self::Error> {
+        let sql = get_num_channel_rows_sql(for_coin)?;
+        let sqlite_connection = self.sqlite_connection.clone();
+
+        async_blocking(move || {
+            let conn = sqlite_connection.lock().unwrap();
+            let count: u32 = conn.query_row(&sql, NO_PARAMS, |r| r.get(0))?;
+            Ok(count)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     extern crate bitcoin;
     extern crate lightning;
-    use crate::LightningPersister;
     use bitcoin::blockdata::block::{Block, BlockHeader};
     use bitcoin::hashes::hex::FromHex;
     use bitcoin::Txid;
+    use common::block_on;
     use db_common::sqlite::rusqlite::Connection;
     use lightning::chain::chainmonitor::Persist;
     use lightning::chain::transaction::OutPoint;
@@ -748,5 +770,54 @@ mod tests {
 
         nodes[1].node.get_and_clear_pending_msg_events();
         added_monitors.clear();
+    }
+
+    #[test]
+    fn test_init_sql_collection() {
+        let for_coin = "init_sql_collection";
+        let persister = LightningPersister::new(
+            PathBuf::from("test_filesystem_persister"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
+        let initialized = block_on(persister.is_sql_initialized(for_coin)).unwrap();
+        assert!(!initialized);
+
+        block_on(persister.init_sql(for_coin)).unwrap();
+        // repetitive init must not fail
+        block_on(persister.init_sql(for_coin)).unwrap();
+
+        let initialized = block_on(persister.is_sql_initialized(for_coin)).unwrap();
+        assert!(initialized);
+    }
+
+    #[test]
+    fn test_add_channel_to_sql() {
+        let chanmon_cfgs = create_chanmon_cfgs(2);
+        let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+        let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+        let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+        create_announced_chan_between_nodes(&nodes, 0, 1, InitFeatures::known(), InitFeatures::known());
+
+        let for_coin = "add_channel";
+        let persister = LightningPersister::new(
+            PathBuf::from("test_filesystem_persister"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
+
+        block_on(persister.init_sql(for_coin)).unwrap();
+        let number_of_rows = block_on(persister.get_number_of_channels_in_sql(for_coin)).unwrap();
+        assert_eq!(number_of_rows, 0);
+
+        let node_1_channel_details = nodes[0].node.list_channels()[0].clone();
+        block_on(persister.add_channel_to_history(for_coin, node_1_channel_details)).unwrap();
+        let number_of_rows = block_on(persister.get_number_of_channels_in_sql(for_coin)).unwrap();
+        assert_eq!(number_of_rows, 1);
+
+        let node_2_channel_details = nodes[1].node.list_channels()[0].clone();
+        block_on(persister.add_channel_to_history(for_coin, node_2_channel_details)).unwrap();
+        let number_of_rows = block_on(persister.get_number_of_channels_in_sql(for_coin)).unwrap();
+        assert_eq!(number_of_rows, 2);
     }
 }

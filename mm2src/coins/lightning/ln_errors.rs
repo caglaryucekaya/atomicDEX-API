@@ -3,6 +3,7 @@ use crate::utxo::GenerateTxError;
 use crate::{BalanceError, CoinFindError, DerivationMethodNotSupported, NumConversError, PrivKeyNotAllowed};
 use common::mm_error::prelude::*;
 use common::HttpStatusCode;
+use db_common::sqlite::rusqlite::Error as SqlError;
 use derive_more::Display;
 use http::StatusCode;
 use lightning_invoice::SignOrCreationError;
@@ -68,6 +69,10 @@ impl From<std::io::Error> for EnableLightningError {
     fn from(err: std::io::Error) -> EnableLightningError { EnableLightningError::IOError(err.to_string()) }
 }
 
+impl From<SqlError> for EnableLightningError {
+    fn from(err: SqlError) -> EnableLightningError { EnableLightningError::SqlError(err.to_string()) }
+}
+
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum ConnectToNodeError {
@@ -130,6 +135,8 @@ pub enum OpenChannelError {
     InternalError(String),
     #[display(fmt = "I/O error {}", _0)]
     IOError(String),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
     ConnectToNodeError(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
@@ -151,6 +158,7 @@ impl HttpStatusCode for OpenChannelError {
             | OpenChannelError::InternalError(_)
             | OpenChannelError::GenerateTxErr(_)
             | OpenChannelError::IOError(_)
+            | OpenChannelError::SqlError(_)
             | OpenChannelError::InvalidPath(_)
             | OpenChannelError::ConvertTxErr(_) => StatusCode::INTERNAL_SERVER_ERROR,
             OpenChannelError::NoSuchCoin(_) | OpenChannelError::BalanceError(_) => StatusCode::PRECONDITION_REQUIRED,
@@ -202,6 +210,10 @@ impl From<std::io::Error> for OpenChannelError {
     fn from(err: std::io::Error) -> OpenChannelError { OpenChannelError::IOError(err.to_string()) }
 }
 
+impl From<SqlError> for OpenChannelError {
+    fn from(err: SqlError) -> OpenChannelError { OpenChannelError::SqlError(err.to_string()) }
+}
+
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum ListChannelsError {
@@ -235,8 +247,8 @@ pub enum GetChannelDetailsError {
     UnsupportedCoin(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
-    #[display(fmt = "Channel with id: {:?} is not found", _0)]
-    NoSuchChannel(H256Json),
+    #[display(fmt = "Channel with rpc id: {} is not found", _0)]
+    NoSuchChannel(u64),
 }
 
 impl HttpStatusCode for GetChannelDetailsError {

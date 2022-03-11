@@ -15,7 +15,7 @@ use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
 use lightning::util::config::UserConfig;
 use lightning::util::ser::ReadableArgs;
-use lightning_persister::storage::{FileSystemStorage, NodesAddressesMap};
+use lightning_persister::storage::{FileSystemStorage, NodesAddressesMap, SqlStorage};
 use lightning_persister::LightningPersister;
 use std::fs::File;
 use std::path::PathBuf;
@@ -66,6 +66,12 @@ pub async fn init_persister(
     let is_initialized = persister.is_fs_initialized().await?;
     if !is_initialized {
         persister.init_fs().await?;
+    }
+    // Todo: use get_history_coin_type and storage_ticker functions - should probably use platform orderbook_ticker
+    // this way we will have channels history and payments history for BTC instead of BTC-segwit for example
+    let is_sql_initialized = persister.is_sql_initialized(&ticker.replace('-', "_")).await?;
+    if !is_sql_initialized {
+        persister.init_sql(&ticker.replace('-', "_")).await?;
     }
     Ok(persister)
 }

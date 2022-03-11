@@ -29,8 +29,9 @@ impl EventHandler for LightningEventHandler {
             Event::FundingGenerationReady {
                 temporary_channel_id,
                 output_script,
+                user_channel_id,
                 ..
-            } => self.handle_funding_generation_ready(*temporary_channel_id, output_script),
+            } => self.handle_funding_generation_ready(*temporary_channel_id, output_script, *user_channel_id),
             Event::PaymentReceived {
                 payment_hash,
                 amt,
@@ -90,7 +91,7 @@ impl EventHandler for LightningEventHandler {
 
 // Generates the raw funding transaction with one output equal to the channel value.
 fn sign_funding_transaction(
-    temp_channel_id: [u8; 32],
+    user_channel_id: u64,
     output_script: &Script,
     platform: Arc<Platform>,
 ) -> OpenChannelResult<Transaction> {
@@ -98,11 +99,11 @@ fn sign_funding_transaction(
     let mut unsigned = {
         let unsigned_funding_txs = platform.unsigned_funding_txs.lock();
         unsigned_funding_txs
-            .get(&temp_channel_id)
+            .get(&user_channel_id)
             .ok_or_else(|| {
                 OpenChannelError::InternalError(format!(
-                    "Unsigned funding tx not found for temporary channel id: {}",
-                    hex::encode(temp_channel_id)
+                    "Unsigned funding tx not found for internal channel id: {}",
+                    user_channel_id
                 ))
             })?
             .clone()
@@ -141,17 +142,22 @@ impl LightningEventHandler {
         }
     }
 
-    fn handle_funding_generation_ready(&self, temporary_channel_id: [u8; 32], output_script: &Script) {
+    fn handle_funding_generation_ready(
+        &self,
+        temporary_channel_id: [u8; 32],
+        output_script: &Script,
+        user_channel_id: u64,
+    ) {
         log::info!(
-            "Handling FundingGenerationReady event for temporary_channel_id: {}",
-            hex::encode(temporary_channel_id)
+            "Handling FundingGenerationReady event for internal channel id: {}",
+            user_channel_id
         );
-        let funding_tx = match sign_funding_transaction(temporary_channel_id, output_script, self.platform.clone()) {
+        let funding_tx = match sign_funding_transaction(user_channel_id, output_script, self.platform.clone()) {
             Ok(tx) => tx,
             Err(e) => {
                 log::error!(
-                    "Error generating funding transaction for temporary channel id {:?}: {}",
-                    temporary_channel_id,
+                    "Error generating funding transaction for internal channel id {}: {}",
+                    user_channel_id,
                     e.to_string()
                 );
                 return;
