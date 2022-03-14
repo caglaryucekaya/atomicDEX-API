@@ -42,7 +42,7 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
-use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared, SqlStorage};
+use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared, PendingChannelForSql, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -777,9 +777,9 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
     }
 
     let storage_ticker = ln_coin.storage_ticker();
-    let rpc_channel_id = ln_coin.persister.get_number_of_channels_in_sql(&storage_ticker).await? as u64;
+    let rpc_channel_id = ln_coin.persister.get_last_channel_rpc_id(&storage_ticker).await? as u64 + 1;
 
-    async_blocking(move || {
+    let temp_channel_id = async_blocking(move || {
         channel_manager
             .create_channel(node_pubkey, amount_in_sat, push_msat, rpc_channel_id, Some(user_config))
             .map_to_mm(|e| OpenChannelError::FailureToOpenChannel(node_pubkey.to_string(), format!("{:?}", e)))
@@ -791,11 +791,25 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         unsigned_funding_txs.insert(rpc_channel_id, unsigned);
     }
 
+    let pending_channel_details = PendingChannelForSql::new(
+        rpc_channel_id,
+        temp_channel_id,
+        node_pubkey,
+        node_addr,
+        true,
+        user_config.channel_options.announced_channel,
+    );
+
     // Saving node data to reconnect to it on restart
     ln_coin.open_channels_nodes.lock().insert(node_pubkey, node_addr);
     ln_coin
         .persister
         .save_nodes_addresses(ln_coin.open_channels_nodes)
+        .await?;
+
+    ln_coin
+        .persister
+        .add_pending_channel_to_sql(&storage_ticker, &pending_channel_details)
         .await?;
 
     Ok(OpenChannelResponse {
@@ -811,8 +825,8 @@ pub struct ListChannelsRequest {
 
 #[derive(Serialize)]
 pub struct ChannelDetailsForRPC {
-    pub channel_id: H256Json,
     pub rpc_channel_id: u64,
+    pub channel_id: H256Json,
     pub counterparty_node_id: PublicKeyForRPC,
     pub funding_tx: Option<H256Json>,
     pub funding_tx_output_index: Option<u16>,
@@ -835,8 +849,8 @@ pub struct ChannelDetailsForRPC {
 impl From<ChannelDetails> for ChannelDetailsForRPC {
     fn from(details: ChannelDetails) -> ChannelDetailsForRPC {
         ChannelDetailsForRPC {
-            channel_id: details.channel_id.into(),
             rpc_channel_id: details.user_channel_id,
+            channel_id: details.channel_id.into(),
             counterparty_node_id: PublicKeyForRPC(details.counterparty.node_id),
             funding_tx: details
                 .funding_txo
