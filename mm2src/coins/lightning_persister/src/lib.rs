@@ -13,7 +13,7 @@ extern crate lightning;
 extern crate secp256k1;
 extern crate serde_json;
 
-use crate::storage::{FileSystemStorage, NodesAddressesMap, NodesAddressesMapShared, PendingChannelForSql, SqlStorage};
+use crate::storage::{FileSystemStorage, NodesAddressesMap, NodesAddressesMapShared, SqlChannelDetails, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
 use bitcoin::blockdata::constants::genesis_block;
@@ -22,7 +22,7 @@ use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::Network;
 use common::async_blocking;
 use common::fs::check_dir_operations;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, NO_PARAMS};
+use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, NO_PARAMS};
 use db_common::sqlite::{query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
@@ -95,12 +95,10 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         channel_id VARCHAR(255) NOT NULL,
         counterparty_node_id VARCHAR(255) NOT NULL,
         counterparty_node_address VARCHAR(255) NOT NULL,
-        funding_tx VARCHAR(255),
-        funding_tx_output_index INTEGER,
-        funding_tx_value_sats INTEGER NOT NULL,
-        closing_tx VARCHAR(255),
-        closing_tx_output_index INTEGER,
-        closing_tx_value_sats INTEGER,
+        funding_tx VARCHAR(255) NOT NULL,
+        initial_balance INTEGER NOT NULL,
+        closing_tx VARCHAR(255) NOT NULL,
+        closing_balance INTEGER NOT NULL,
         is_outbound INTEGER NOT NULL,
         is_public INTEGER NOT NULL,
         is_pending INTEGER NOT NULL,
@@ -117,9 +115,36 @@ fn insert_channel_in_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT INTO ".to_owned()
         + &table_name
-        + " (rpc_id, channel_id, counterparty_node_id, counterparty_node_address, funding_tx, funding_tx_output_index, funding_tx_value_sats, closing_tx, closing_tx_output_index, closing_tx_value_sats, is_outbound, is_public, is_pending, is_open, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);";
+        + " (rpc_id, channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, is_outbound, is_public, is_pending, is_open, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10, ?11, ?12, ?13);";
 
     Ok(sql)
+}
+
+fn select_channel_from_table_by_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "SELECT channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, is_outbound, is_public, is_pending, is_open, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
+
+    Ok(sql)
+}
+
+fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError> {
+    let channel_details = SqlChannelDetails {
+        channel_id: row.get(0)?,
+        counterparty_node_id: row.get(1)?,
+        counterparty_node_address: row.get(2)?,
+        funding_tx: row.get(3)?,
+        initial_balance: row.get::<_, u32>(4)? as u64,
+        closing_tx: row.get(5)?,
+        closing_balance: row.get::<_, u32>(6)? as u64,
+        is_outbound: row.get(7)?,
+        is_public: row.get(8)?,
+        is_pending: row.get(9)?,
+        is_open: row.get(10)?,
+        is_closed: row.get(11)?,
+    };
+    Ok(channel_details)
 }
 
 fn get_last_channel_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
@@ -127,6 +152,15 @@ fn get_last_channel_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
     validate_table_name(&table_name)?;
 
     let sql = "SELECT MAX(rpc_id) FROM ".to_owned() + &table_name + ";";
+
+    Ok(sql)
+}
+
+fn update_funding_tx_in_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "UPDATE ".to_owned() + &table_name + " SET funding_tx = ?2, initial_balance = ?3 WHERE rpc_id = ?1;";
 
     Ok(sql)
 }
@@ -498,27 +532,26 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn add_pending_channel_to_sql(
+    async fn add_channel_to_sql(
         &self,
         for_coin: &str,
-        details: &PendingChannelForSql,
+        rpc_id: u64,
+        details: SqlChannelDetails,
     ) -> Result<(), Self::Error> {
         let for_coin = for_coin.to_owned();
-        let rpc_id = details.rpc_id.to_string();
-        let channel_id = hex::encode(details.channel_id);
-        let counterparty_node_id = details.counterparty_node_id.to_string();
-        let counterparty_node_address = details.counterparty_node_address.to_string();
-        let funding_tx = String::default();
-        let funding_tx_output_index = String::default();
-        let funding_tx_value_sats = String::default();
-        let closing_tx = String::default();
-        let closing_tx_output_index = String::default();
-        let closing_tx_value_sats = String::default();
+        let rpc_id = rpc_id.to_string();
+        let channel_id = details.channel_id;
+        let counterparty_node_id = details.counterparty_node_id;
+        let counterparty_node_address = details.counterparty_node_address;
+        let funding_tx = details.funding_tx;
+        let initial_balance = details.initial_balance.to_string();
+        let closing_tx = details.closing_tx;
+        let closing_balance = details.closing_balance.to_string();
         let is_outbound = (details.is_outbound as i32).to_string();
         let is_public = (details.is_public as i32).to_string();
-        let is_pending = 1_u8.to_string();
-        let is_open = 0_u8.to_string();
-        let is_closed = 0_u8.to_string();
+        let is_pending = (details.is_pending as i32).to_string();
+        let is_open = (details.is_open as i32).to_string();
+        let is_closed = (details.is_closed as i32).to_string();
 
         let params = [
             rpc_id,
@@ -526,11 +559,9 @@ impl SqlStorage for LightningPersister {
             counterparty_node_id,
             counterparty_node_address,
             funding_tx,
-            funding_tx_output_index,
-            funding_tx_value_sats,
+            initial_balance,
             closing_tx,
-            closing_tx_output_index,
-            closing_tx_value_sats,
+            closing_balance,
             is_outbound,
             is_public,
             is_pending,
@@ -549,6 +580,22 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
+    async fn get_channel_from_sql(
+        &self,
+        for_coin: &str,
+        rpc_id: u64,
+    ) -> Result<Option<SqlChannelDetails>, Self::Error> {
+        let params = [rpc_id.to_string()];
+        let sql = select_channel_from_table_by_rpc_id_sql(for_coin)?;
+        let sqlite_connection = self.sqlite_connection.clone();
+
+        async_blocking(move || {
+            let conn = sqlite_connection.lock().unwrap();
+            query_single_row(&conn, &sql, params, channel_details_from_row)
+        })
+        .await
+    }
+
     async fn get_last_channel_rpc_id(&self, for_coin: &str) -> Result<u32, Self::Error> {
         let sql = get_last_channel_rpc_id_sql(for_coin)?;
         let sqlite_connection = self.sqlite_connection.clone();
@@ -557,6 +604,30 @@ impl SqlStorage for LightningPersister {
             let conn = sqlite_connection.lock().unwrap();
             let count: u32 = conn.query_row(&sql, NO_PARAMS, |r| r.get(0))?;
             Ok(count)
+        })
+        .await
+    }
+
+    async fn add_funding_tx_to_sql(
+        &self,
+        for_coin: &str,
+        rpc_id: u64,
+        funding_tx: String,
+        initial_balance: u64,
+    ) -> Result<(), Self::Error> {
+        let for_coin = for_coin.to_owned();
+        let rpc_id = rpc_id.to_string();
+        let initial_balance = initial_balance.to_string();
+
+        let params = [rpc_id, funding_tx, initial_balance];
+
+        let sqlite_connection = self.sqlite_connection.clone();
+        async_blocking(move || {
+            let mut conn = sqlite_connection.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+            sql_transaction.execute(&update_funding_tx_in_sql(&for_coin)?, &params)?;
+            sql_transaction.commit()?;
+            Ok(())
         })
         .await
     }
@@ -804,8 +875,8 @@ mod tests {
     }
 
     #[test]
-    fn test_add_pending_channel_to_sql() {
-        let for_coin = "add_channel";
+    fn test_add_get_channel_sql() {
+        let for_coin = "add_get_channel";
         let persister = LightningPersister::new(
             PathBuf::from("test_filesystem_persister"),
             None,
@@ -814,26 +885,43 @@ mod tests {
 
         block_on(persister.init_sql(for_coin)).unwrap();
 
-        let pending_chan_1_details = PendingChannelForSql::new(
-            1,
+        let channel = block_on(persister.get_channel_from_sql(for_coin, 1)).unwrap();
+        assert!(channel.is_none());
+
+        let mut expected_channel_details = SqlChannelDetails::new(
             [0; 32],
             PublicKey::from_str("038863cf8ab91046230f561cd5b386cbff8309fa02e3f0c3ed161a3aeb64a643b9").unwrap(),
             "127.0.0.1:9735".parse().unwrap(),
+            2000,
             true,
             true,
         );
-        block_on(persister.add_pending_channel_to_sql(for_coin, &pending_chan_1_details)).unwrap();
+        block_on(persister.add_channel_to_sql(for_coin, 1, expected_channel_details.clone())).unwrap();
         let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id(for_coin)).unwrap();
         assert_eq!(last_channel_rpc_id, 1);
+
+        let actual_channel_details = block_on(persister.get_channel_from_sql(for_coin, 1)).unwrap().unwrap();
+        assert_eq!(expected_channel_details, actual_channel_details);
 
         // must fail because we are adding channel with the same rpc_id
-        block_on(persister.add_pending_channel_to_sql(for_coin, &pending_chan_1_details)).unwrap_err();
+        block_on(persister.add_channel_to_sql(for_coin, 1, expected_channel_details.clone())).unwrap_err();
         assert_eq!(last_channel_rpc_id, 1);
 
-        let mut pending_chan_2_details = pending_chan_1_details;
-        pending_chan_2_details.rpc_id = 2;
-        block_on(persister.add_pending_channel_to_sql(for_coin, &pending_chan_2_details)).unwrap();
+        block_on(persister.add_channel_to_sql(for_coin, 2, expected_channel_details.clone())).unwrap();
         let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id(for_coin)).unwrap();
         assert_eq!(last_channel_rpc_id, 2);
+
+        block_on(persister.add_funding_tx_to_sql(
+            for_coin,
+            2,
+            "04d3f3931b7644094bbdaadbf341183d35bb7251cea2c91f5058cee28b7c2f20".into(),
+            3000,
+        ))
+        .unwrap();
+        expected_channel_details.funding_tx = "04d3f3931b7644094bbdaadbf341183d35bb7251cea2c91f5058cee28b7c2f20".into();
+        expected_channel_details.initial_balance = 3000;
+
+        let actual_channel_details = block_on(persister.get_channel_from_sql(for_coin, 2)).unwrap().unwrap();
+        assert_eq!(expected_channel_details, actual_channel_details)
     }
 }

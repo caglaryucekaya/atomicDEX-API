@@ -33,31 +33,44 @@ pub trait FileSystemStorage {
     async fn save_scorer(&self, scorer: Arc<Mutex<Scorer>>) -> Result<(), Self::Error>;
 }
 
-pub struct PendingChannelForSql {
-    pub rpc_id: u64,
-    pub channel_id: [u8; 32],
-    pub counterparty_node_id: PublicKey,
-    pub counterparty_node_address: SocketAddr,
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqlChannelDetails {
+    pub channel_id: String,
+    pub counterparty_node_id: String,
+    pub counterparty_node_address: String,
+    pub funding_tx: String,
+    pub initial_balance: u64,
+    pub closing_tx: String,
+    pub closing_balance: u64,
     pub is_outbound: bool,
     pub is_public: bool,
+    pub is_pending: bool,
+    pub is_open: bool,
+    pub is_closed: bool,
 }
 
-impl PendingChannelForSql {
+impl SqlChannelDetails {
     pub fn new(
-        rpc_id: u64,
         channel_id: [u8; 32],
         counterparty_node_id: PublicKey,
         counterparty_node_address: SocketAddr,
+        initial_balance: u64,
         is_outbound: bool,
         is_public: bool,
     ) -> Self {
-        PendingChannelForSql {
-            rpc_id,
-            channel_id,
-            counterparty_node_id,
-            counterparty_node_address,
+        SqlChannelDetails {
+            channel_id: hex::encode(channel_id),
+            counterparty_node_id: counterparty_node_id.to_string(),
+            counterparty_node_address: counterparty_node_address.to_string(),
+            funding_tx: "".into(),
+            initial_balance,
+            closing_tx: "".into(),
+            closing_balance: 0,
             is_outbound,
             is_public,
+            is_pending: true,
+            is_open: false,
+            is_closed: false,
         }
     }
 }
@@ -71,11 +84,23 @@ pub trait SqlStorage {
 
     async fn is_sql_initialized(&self, for_coin: &str) -> Result<bool, Self::Error>;
 
-    async fn add_pending_channel_to_sql(
+    async fn add_channel_to_sql(
         &self,
         for_coin: &str,
-        details: &PendingChannelForSql,
+        rpc_id: u64,
+        details: SqlChannelDetails,
     ) -> Result<(), Self::Error>;
 
+    async fn get_channel_from_sql(&self, for_coin: &str, rpc_id: u64)
+        -> Result<Option<SqlChannelDetails>, Self::Error>;
+
     async fn get_last_channel_rpc_id(&self, for_coin: &str) -> Result<u32, Self::Error>;
+
+    async fn add_funding_tx_to_sql(
+        &self,
+        for_coin: &str,
+        rpc_id: u64,
+        funding_tx: String,
+        initial_balance: u64,
+    ) -> Result<(), Self::Error>;
 }

@@ -42,7 +42,7 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
-use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared, PendingChannelForSql, SqlStorage};
+use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared, SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -791,11 +791,11 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         unsigned_funding_txs.insert(rpc_channel_id, unsigned);
     }
 
-    let pending_channel_details = PendingChannelForSql::new(
-        rpc_channel_id,
+    let pending_channel_details = SqlChannelDetails::new(
         temp_channel_id,
         node_pubkey,
         node_addr,
+        amount_in_sat,
         true,
         user_config.channel_options.announced_channel,
     );
@@ -809,7 +809,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
 
     ln_coin
         .persister
-        .add_pending_channel_to_sql(&storage_ticker, &pending_channel_details)
+        .add_channel_to_sql(&storage_ticker, rpc_channel_id, pending_channel_details)
         .await?;
 
     Ok(OpenChannelResponse {
