@@ -60,6 +60,7 @@ use std::sync::{Arc, Mutex};
 /// LightningPersister.
 
 pub struct LightningPersister {
+    storage_ticker: String,
     main_path: PathBuf,
     backup_path: Option<PathBuf>,
     sqlite_connection: Arc<Mutex<Connection>>,
@@ -168,8 +169,14 @@ fn update_funding_tx_in_sql(for_coin: &str) -> Result<String, SqlError> {
 impl LightningPersister {
     /// Initialize a new LightningPersister and set the path to the individual channels'
     /// files.
-    pub fn new(main_path: PathBuf, backup_path: Option<PathBuf>, sqlite_connection: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(
+        storage_ticker: String,
+        main_path: PathBuf,
+        backup_path: Option<PathBuf>,
+        sqlite_connection: Arc<Mutex<Connection>>,
+    ) -> Self {
         Self {
+            storage_ticker,
             main_path,
             backup_path,
             sqlite_connection,
@@ -507,9 +514,9 @@ impl FileSystemStorage for LightningPersister {
 impl SqlStorage for LightningPersister {
     type Error = SqlError;
 
-    async fn init_sql(&self, for_coin: &str) -> Result<(), Self::Error> {
+    async fn init_sql(&self) -> Result<(), Self::Error> {
         let sqlite_connection = self.sqlite_connection.clone();
-        let sql_channels_history = create_channels_history_table_sql(for_coin)?;
+        let sql_channels_history = create_channels_history_table_sql(self.storage_ticker.as_str())?;
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
             conn.execute(&sql_channels_history, NO_PARAMS).map(|_| ())?;
@@ -518,8 +525,8 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn is_sql_initialized(&self, for_coin: &str) -> Result<bool, Self::Error> {
-        let channels_history_table = channels_history_table(for_coin);
+    async fn is_sql_initialized(&self) -> Result<bool, Self::Error> {
+        let channels_history_table = channels_history_table(self.storage_ticker.as_str());
         validate_table_name(&channels_history_table)?;
 
         let sqlite_connection = self.sqlite_connection.clone();
@@ -532,13 +539,8 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn add_channel_to_sql(
-        &self,
-        for_coin: &str,
-        rpc_id: u64,
-        details: SqlChannelDetails,
-    ) -> Result<(), Self::Error> {
-        let for_coin = for_coin.to_owned();
+    async fn add_channel_to_sql(&self, rpc_id: u64, details: SqlChannelDetails) -> Result<(), Self::Error> {
+        let for_coin = self.storage_ticker.clone();
         let rpc_id = rpc_id.to_string();
         let channel_id = details.channel_id;
         let counterparty_node_id = details.counterparty_node_id;
@@ -580,13 +582,9 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_channel_from_sql(
-        &self,
-        for_coin: &str,
-        rpc_id: u64,
-    ) -> Result<Option<SqlChannelDetails>, Self::Error> {
+    async fn get_channel_from_sql(&self, rpc_id: u64) -> Result<Option<SqlChannelDetails>, Self::Error> {
         let params = [rpc_id.to_string()];
-        let sql = select_channel_from_table_by_rpc_id_sql(for_coin)?;
+        let sql = select_channel_from_table_by_rpc_id_sql(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
 
         async_blocking(move || {
@@ -596,8 +594,8 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_last_channel_rpc_id(&self, for_coin: &str) -> Result<u32, Self::Error> {
-        let sql = get_last_channel_rpc_id_sql(for_coin)?;
+    async fn get_last_channel_rpc_id(&self) -> Result<u32, Self::Error> {
+        let sql = get_last_channel_rpc_id_sql(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
 
         async_blocking(move || {
@@ -610,12 +608,11 @@ impl SqlStorage for LightningPersister {
 
     async fn add_funding_tx_to_sql(
         &self,
-        for_coin: &str,
         rpc_id: u64,
         funding_tx: String,
         initial_balance: u64,
     ) -> Result<(), Self::Error> {
-        let for_coin = for_coin.to_owned();
+        let for_coin = self.storage_ticker.clone();
         let rpc_id = rpc_id.to_string();
         let initial_balance = initial_balance.to_string();
 

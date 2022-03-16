@@ -80,25 +80,18 @@ pub trait SqlStorage {
     type Error;
 
     /// Initializes dirs/collection/tables in storage for a specified coin
-    async fn init_sql(&self, for_coin: &str) -> Result<(), Self::Error>;
+    async fn init_sql(&self) -> Result<(), Self::Error>;
 
-    async fn is_sql_initialized(&self, for_coin: &str) -> Result<bool, Self::Error>;
+    async fn is_sql_initialized(&self) -> Result<bool, Self::Error>;
 
-    async fn add_channel_to_sql(
-        &self,
-        for_coin: &str,
-        rpc_id: u64,
-        details: SqlChannelDetails,
-    ) -> Result<(), Self::Error>;
+    async fn add_channel_to_sql(&self, rpc_id: u64, details: SqlChannelDetails) -> Result<(), Self::Error>;
 
-    async fn get_channel_from_sql(&self, for_coin: &str, rpc_id: u64)
-        -> Result<Option<SqlChannelDetails>, Self::Error>;
+    async fn get_channel_from_sql(&self, rpc_id: u64) -> Result<Option<SqlChannelDetails>, Self::Error>;
 
-    async fn get_last_channel_rpc_id(&self, for_coin: &str) -> Result<u32, Self::Error>;
+    async fn get_last_channel_rpc_id(&self) -> Result<u32, Self::Error>;
 
     async fn add_funding_tx_to_sql(
         &self,
-        for_coin: &str,
         rpc_id: u64,
         funding_tx: String,
         initial_balance: u64,

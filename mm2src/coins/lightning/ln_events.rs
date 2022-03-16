@@ -19,6 +19,7 @@ pub struct LightningEventHandler {
     platform: Arc<Platform>,
     channel_manager: Arc<ChannelManager>,
     keys_manager: Arc<KeysManager>,
+    persister: Arc<LightningPersister>,
     inbound_payments: PaymentsMapShared,
     outbound_payments: PaymentsMapShared,
 }
@@ -28,10 +29,10 @@ impl EventHandler for LightningEventHandler {
         match event {
             Event::FundingGenerationReady {
                 temporary_channel_id,
+                channel_value_satoshis,
                 output_script,
                 user_channel_id,
-                ..
-            } => self.handle_funding_generation_ready(*temporary_channel_id, output_script, *user_channel_id),
+            } => self.handle_funding_generation_ready(*temporary_channel_id, *channel_value_satoshis, output_script, *user_channel_id),
             Event::PaymentReceived {
                 payment_hash,
                 amt,
@@ -130,6 +131,7 @@ impl LightningEventHandler {
         platform: Arc<Platform>,
         channel_manager: Arc<ChannelManager>,
         keys_manager: Arc<KeysManager>,
+        persister: Arc<LightningPersister>,
         inbound_payments: PaymentsMapShared,
         outbound_payments: PaymentsMapShared,
     ) -> Self {
@@ -137,6 +139,7 @@ impl LightningEventHandler {
             platform,
             channel_manager,
             keys_manager,
+            persister,
             inbound_payments,
             outbound_payments,
         }
@@ -145,6 +148,7 @@ impl LightningEventHandler {
     fn handle_funding_generation_ready(
         &self,
         temporary_channel_id: [u8; 32],
+        channel_value_satoshis: u64,
         output_script: &Script,
         user_channel_id: u64,
     ) {
@@ -163,13 +167,24 @@ impl LightningEventHandler {
                 return;
             },
         };
+        let funding_txid = funding_tx.txid();
         // Give the funding transaction back to LDK for opening the channel.
         if let Err(e) = self
             .channel_manager
             .funding_transaction_generated(&temporary_channel_id, funding_tx)
         {
             log::error!("{:?}", e);
+            return;
         }
+        let persister = self.persister.clone();
+        spawn(async move {
+            if let Err(e) = persister
+                .add_funding_tx_to_sql(user_channel_id, funding_txid.to_string(), channel_value_satoshis)
+                .await
+            {
+                log::error!("{}", e);
+            }
+        });
     }
 
     fn handle_payment_received(&self, payment_hash: PaymentHash, amt: u64, purpose: &PaymentPurpose) {

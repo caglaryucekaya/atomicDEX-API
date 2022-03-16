@@ -185,9 +185,6 @@ impl LightningCoin {
             fee_paid_msat: None,
         }))
     }
-
-    // Todo: implement GetHistoryCoinType instead
-    fn storage_ticker(&self) -> String { self.ticker().replace('-', "_") }
 }
 
 #[async_trait]
@@ -577,6 +574,7 @@ pub async fn start_lightning(
         platform.clone(),
         channel_manager.clone(),
         keys_manager.clone(),
+        persister.clone(),
         inbound_payments.clone(),
         outbound_payments.clone(),
     ));
@@ -776,8 +774,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         user_config.own_channel_config.our_htlc_minimum_msat = min;
     }
 
-    let storage_ticker = ln_coin.storage_ticker();
-    let rpc_channel_id = ln_coin.persister.get_last_channel_rpc_id(&storage_ticker).await? as u64 + 1;
+    let rpc_channel_id = ln_coin.persister.get_last_channel_rpc_id().await? as u64 + 1;
 
     let temp_channel_id = async_blocking(move || {
         channel_manager
@@ -809,7 +806,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
 
     ln_coin
         .persister
-        .add_channel_to_sql(&storage_ticker, rpc_channel_id, pending_channel_details)
+        .add_channel_to_sql(rpc_channel_id, pending_channel_details)
         .await?;
 
     Ok(OpenChannelResponse {

@@ -55,6 +55,10 @@ pub async fn init_persister(
     let ln_data_dir = ln_data_dir(ctx, &ticker);
     let ln_data_backup_dir = ln_data_backup_dir(ctx, backup_path, &ticker);
     let persister = Arc::new(LightningPersister::new(
+        // Todo: Maybe implement GetHistoryCoinType instead / use get_history_coin_type and storage_ticker functions
+        // should probably use platform orderbook_ticker this way we will have channels history and payments history
+        // for BTC instead of BTC-segwit for example
+        ticker.replace('-', "_"),
         ln_data_dir,
         ln_data_backup_dir,
         ctx.sqlite_connection
@@ -67,11 +71,9 @@ pub async fn init_persister(
     if !is_initialized {
         persister.init_fs().await?;
     }
-    // Todo: use get_history_coin_type and storage_ticker functions - should probably use platform orderbook_ticker
-    // this way we will have channels history and payments history for BTC instead of BTC-segwit for example
-    let is_sql_initialized = persister.is_sql_initialized(&ticker.replace('-', "_")).await?;
+    let is_sql_initialized = persister.is_sql_initialized().await?;
     if !is_sql_initialized {
-        persister.init_sql(&ticker.replace('-', "_")).await?;
+        persister.init_sql().await?;
     }
     Ok(persister)
 }
