@@ -6,7 +6,7 @@ use common::log;
 use core::time::Duration;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::keysinterface::SpendableOutputDescriptor;
-use lightning::util::events::{Event, EventHandler, PaymentPurpose};
+use lightning::util::events::{ClosureReason, Event, EventHandler, PaymentPurpose};
 use rand::Rng;
 use script::{Builder, SignatureVersion};
 use secp256k1::Secp256k1;
@@ -54,12 +54,7 @@ impl EventHandler for LightningEventHandler {
                     self.platform.coin.ticker(),
                     claim_from_onchain_tx,
                 ),
-            // Todo: Use storage to store channels history
-            Event::ChannelClosed { channel_id, reason, .. } => log::info!(
-                    "Channel: {} closed for the following reason: {}",
-                    hex::encode(channel_id),
-                    reason
-                ),
+            Event::ChannelClosed { channel_id, user_channel_id, reason } => self.handle_channel_closed(*channel_id, *user_channel_id, reason),
             // Todo: Add spent UTXOs to RecentlySpentOutPoints if it's not discarded
             Event::DiscardFunding { channel_id, transaction } => log::info!(
                     "Discarding funding tx: {} for channel {}",
@@ -253,6 +248,14 @@ impl LightningEventHandler {
                 hex::encode(payment_hash.0)
             );
         }
+    }
+
+    fn handle_channel_closed(&self, channel_id: [u8; 32], _user_channel_id: u64, reason: &ClosureReason) {
+        log::info!(
+            "Channel: {} closed for the following reason: {}",
+            hex::encode(channel_id),
+            reason
+        )
     }
 
     fn handle_payment_failed(&self, payment_hash: &PaymentHash) {

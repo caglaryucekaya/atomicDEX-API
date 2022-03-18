@@ -444,6 +444,7 @@ mod tests {
             let chain_source = Arc::new(test_utils::TestChainSource::new(Network::Testnet));
             let logger = Arc::new(test_utils::TestLogger::with_id(format!("node {}", i)));
             let persister = Arc::new(LightningPersister::new(
+                format!("node_{}_ticker", i),
                 PathBuf::from(format!("{}_persister_{}", persist_dir, i)),
                 None,
                 Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),

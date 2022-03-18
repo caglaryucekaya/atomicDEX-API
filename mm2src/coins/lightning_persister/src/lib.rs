@@ -100,6 +100,7 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         initial_balance INTEGER NOT NULL,
         closing_tx VARCHAR(255) NOT NULL,
         closing_balance INTEGER NOT NULL,
+        closure_reason TEXT NOT NULL,
         is_outbound INTEGER NOT NULL,
         is_public INTEGER NOT NULL,
         is_pending INTEGER NOT NULL,
@@ -116,7 +117,7 @@ fn insert_channel_in_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT INTO ".to_owned()
         + &table_name
-        + " (rpc_id, channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, is_outbound, is_public, is_pending, is_open, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10, ?11, ?12, ?13);";
+        + " (rpc_id, channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_pending, is_open, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);";
 
     Ok(sql)
 }
@@ -125,7 +126,7 @@ fn select_channel_from_table_by_rpc_id_sql(for_coin: &str) -> Result<String, Sql
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, is_outbound, is_public, is_pending, is_open, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
+    let sql = "SELECT channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_pending, is_open, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
 
     Ok(sql)
 }
@@ -139,11 +140,12 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
         initial_balance: row.get::<_, u32>(4)? as u64,
         closing_tx: row.get(5)?,
         closing_balance: row.get::<_, u32>(6)? as u64,
-        is_outbound: row.get(7)?,
-        is_public: row.get(8)?,
-        is_pending: row.get(9)?,
-        is_open: row.get(10)?,
-        is_closed: row.get(11)?,
+        closure_reason: row.get(7)?,
+        is_outbound: row.get(8)?,
+        is_public: row.get(9)?,
+        is_pending: row.get(10)?,
+        is_open: row.get(11)?,
+        is_closed: row.get(12)?,
     };
     Ok(channel_details)
 }
@@ -549,6 +551,7 @@ impl SqlStorage for LightningPersister {
         let initial_balance = details.initial_balance.to_string();
         let closing_tx = details.closing_tx;
         let closing_balance = details.closing_balance.to_string();
+        let closure_reason = details.closure_reason;
         let is_outbound = (details.is_outbound as i32).to_string();
         let is_public = (details.is_public as i32).to_string();
         let is_pending = (details.is_pending as i32).to_string();
@@ -564,6 +567,7 @@ impl SqlStorage for LightningPersister {
             initial_balance,
             closing_tx,
             closing_balance,
+            closure_reason,
             is_outbound,
             is_public,
             is_pending,
@@ -670,11 +674,13 @@ mod tests {
     fn test_filesystem_persister() {
         // Create the nodes, giving them LightningPersisters for data persisters.
         let persister_0 = LightningPersister::new(
+            "test_filesystem_persister_0".into(),
             PathBuf::from("test_filesystem_persister_0"),
             None,
             Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
         );
         let persister_1 = LightningPersister::new(
+            "test_filesystem_persister_1".into(),
             PathBuf::from("test_filesystem_persister_1"),
             None,
             Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
@@ -774,7 +780,12 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_readonly_dir_perm_failure() {
-        let persister = LightningPersister::new(PathBuf::from("test_readonly_dir_perm_failure"), None);
+        let persister = LightningPersister::new(
+            "test_readonly_dir_perm_failure".into(),
+            PathBuf::from("test_readonly_dir_perm_failure"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
         fs::create_dir_all(&persister.main_path).unwrap();
 
         // Set up a dummy channel and force close. This will produce a monitor
@@ -834,6 +845,7 @@ mod tests {
         // don't seem to be invalid filename characters on Unix that Rust doesn't
         // handle, hence why the test is Windows-only.
         let persister = LightningPersister::new(
+            "test_fail_on_open".into(),
             PathBuf::from(":<>/"),
             None,
             Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
@@ -854,35 +866,35 @@ mod tests {
 
     #[test]
     fn test_init_sql_collection() {
-        let for_coin = "init_sql_collection";
         let persister = LightningPersister::new(
+            "init_sql_collection".into(),
             PathBuf::from("test_filesystem_persister"),
             None,
             Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
         );
-        let initialized = block_on(persister.is_sql_initialized(for_coin)).unwrap();
+        let initialized = block_on(persister.is_sql_initialized()).unwrap();
         assert!(!initialized);
 
-        block_on(persister.init_sql(for_coin)).unwrap();
+        block_on(persister.init_sql()).unwrap();
         // repetitive init must not fail
-        block_on(persister.init_sql(for_coin)).unwrap();
+        block_on(persister.init_sql()).unwrap();
 
-        let initialized = block_on(persister.is_sql_initialized(for_coin)).unwrap();
+        let initialized = block_on(persister.is_sql_initialized()).unwrap();
         assert!(initialized);
     }
 
     #[test]
     fn test_add_get_channel_sql() {
-        let for_coin = "add_get_channel";
         let persister = LightningPersister::new(
+            "add_get_channel".into(),
             PathBuf::from("test_filesystem_persister"),
             None,
             Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
         );
 
-        block_on(persister.init_sql(for_coin)).unwrap();
+        block_on(persister.init_sql()).unwrap();
 
-        let channel = block_on(persister.get_channel_from_sql(for_coin, 1)).unwrap();
+        let channel = block_on(persister.get_channel_from_sql(1)).unwrap();
         assert!(channel.is_none());
 
         let mut expected_channel_details = SqlChannelDetails::new(
@@ -893,23 +905,22 @@ mod tests {
             true,
             true,
         );
-        block_on(persister.add_channel_to_sql(for_coin, 1, expected_channel_details.clone())).unwrap();
-        let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id(for_coin)).unwrap();
+        block_on(persister.add_channel_to_sql(1, expected_channel_details.clone())).unwrap();
+        let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id()).unwrap();
         assert_eq!(last_channel_rpc_id, 1);
 
-        let actual_channel_details = block_on(persister.get_channel_from_sql(for_coin, 1)).unwrap().unwrap();
+        let actual_channel_details = block_on(persister.get_channel_from_sql(1)).unwrap().unwrap();
         assert_eq!(expected_channel_details, actual_channel_details);
 
         // must fail because we are adding channel with the same rpc_id
-        block_on(persister.add_channel_to_sql(for_coin, 1, expected_channel_details.clone())).unwrap_err();
+        block_on(persister.add_channel_to_sql(1, expected_channel_details.clone())).unwrap_err();
         assert_eq!(last_channel_rpc_id, 1);
 
-        block_on(persister.add_channel_to_sql(for_coin, 2, expected_channel_details.clone())).unwrap();
-        let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id(for_coin)).unwrap();
+        block_on(persister.add_channel_to_sql(2, expected_channel_details.clone())).unwrap();
+        let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id()).unwrap();
         assert_eq!(last_channel_rpc_id, 2);
 
         block_on(persister.add_funding_tx_to_sql(
-            for_coin,
             2,
             "04d3f3931b7644094bbdaadbf341183d35bb7251cea2c91f5058cee28b7c2f20".into(),
             3000,
@@ -918,7 +929,7 @@ mod tests {
         expected_channel_details.funding_tx = "04d3f3931b7644094bbdaadbf341183d35bb7251cea2c91f5058cee28b7c2f20".into();
         expected_channel_details.initial_balance = 3000;
 
-        let actual_channel_details = block_on(persister.get_channel_from_sql(for_coin, 2)).unwrap().unwrap();
+        let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
         assert_eq!(expected_channel_details, actual_channel_details)
     }
 }
