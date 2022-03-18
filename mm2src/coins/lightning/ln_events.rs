@@ -6,7 +6,7 @@ use common::log;
 use core::time::Duration;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::keysinterface::SpendableOutputDescriptor;
-use lightning::util::events::{ClosureReason, Event, EventHandler, PaymentPurpose};
+use lightning::util::events::{Event, EventHandler, PaymentPurpose};
 use rand::Rng;
 use script::{Builder, SignatureVersion};
 use secp256k1::Secp256k1;
@@ -54,7 +54,7 @@ impl EventHandler for LightningEventHandler {
                     self.platform.coin.ticker(),
                     claim_from_onchain_tx,
                 ),
-            Event::ChannelClosed { channel_id, user_channel_id, reason } => self.handle_channel_closed(*channel_id, *user_channel_id, reason),
+            Event::ChannelClosed { channel_id, user_channel_id, reason } => self.handle_channel_closed(*channel_id, *user_channel_id, reason.to_string()),
             // Todo: Add spent UTXOs to RecentlySpentOutPoints if it's not discarded
             Event::DiscardFunding { channel_id, transaction } => log::info!(
                     "Discarding funding tx: {} for channel {}",
@@ -250,12 +250,23 @@ impl LightningEventHandler {
         }
     }
 
-    fn handle_channel_closed(&self, channel_id: [u8; 32], _user_channel_id: u64, reason: &ClosureReason) {
+    fn handle_channel_closed(&self, channel_id: [u8; 32], user_channel_id: u64, reason: String) {
         log::info!(
             "Channel: {} closed for the following reason: {}",
             hex::encode(channel_id),
             reason
-        )
+        );
+        let persister = self.persister.clone();
+        // Todo: Handle inbound channels closure case after updating to latest version of rust-lightning
+        // as it has a new OpenChannelRequest event where we can give an inbound channel a user_channel_id
+        // other than 0 in sql
+        if user_channel_id != 0 {
+            spawn(async move {
+                if let Err(e) = persister.update_channel_to_closed(user_channel_id, reason).await {
+                    log::error!("{}", e);
+                }
+            });
+        }
     }
 
     fn handle_payment_failed(&self, payment_hash: &PaymentHash) {

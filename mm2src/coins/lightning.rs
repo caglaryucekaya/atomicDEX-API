@@ -791,7 +791,6 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
     let pending_channel_details = SqlChannelDetails::new(
         temp_channel_id,
         node_pubkey,
-        node_addr,
         amount_in_sat,
         true,
         user_config.channel_options.announced_channel,

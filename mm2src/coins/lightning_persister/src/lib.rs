@@ -95,7 +95,6 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         rpc_id INTEGER NOT NULL UNIQUE,
         channel_id VARCHAR(255) NOT NULL,
         counterparty_node_id VARCHAR(255) NOT NULL,
-        counterparty_node_address VARCHAR(255) NOT NULL,
         funding_tx VARCHAR(255) NOT NULL,
         initial_balance INTEGER NOT NULL,
         closing_tx VARCHAR(255) NOT NULL,
@@ -103,8 +102,6 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         closure_reason TEXT NOT NULL,
         is_outbound INTEGER NOT NULL,
         is_public INTEGER NOT NULL,
-        is_pending INTEGER NOT NULL,
-        is_open INTEGER NOT NULL,
         is_closed INTEGER NOT NULL
     );";
 
@@ -117,7 +114,7 @@ fn insert_channel_in_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT INTO ".to_owned()
         + &table_name
-        + " (rpc_id, channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_pending, is_open, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);";
+        + " (rpc_id, channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7, ?8, ?9, ?10, ?11);";
 
     Ok(sql)
 }
@@ -126,7 +123,7 @@ fn select_channel_from_table_by_rpc_id_sql(for_coin: &str) -> Result<String, Sql
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT channel_id, counterparty_node_id, counterparty_node_address, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_pending, is_open, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
+    let sql = "SELECT channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
 
     Ok(sql)
 }
@@ -135,17 +132,14 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
     let channel_details = SqlChannelDetails {
         channel_id: row.get(0)?,
         counterparty_node_id: row.get(1)?,
-        counterparty_node_address: row.get(2)?,
-        funding_tx: row.get(3)?,
-        initial_balance: row.get::<_, u32>(4)? as u64,
-        closing_tx: row.get(5)?,
-        closing_balance: row.get::<_, u32>(6)? as u64,
-        closure_reason: row.get(7)?,
-        is_outbound: row.get(8)?,
-        is_public: row.get(9)?,
-        is_pending: row.get(10)?,
-        is_open: row.get(11)?,
-        is_closed: row.get(12)?,
+        funding_tx: row.get(2)?,
+        initial_balance: row.get::<_, u32>(3)? as u64,
+        closing_tx: row.get(4)?,
+        closing_balance: row.get::<_, u32>(5)? as u64,
+        closure_reason: row.get(6)?,
+        is_outbound: row.get(7)?,
+        is_public: row.get(8)?,
+        is_closed: row.get(9)?,
     };
     Ok(channel_details)
 }
@@ -164,6 +158,15 @@ fn update_funding_tx_in_sql(for_coin: &str) -> Result<String, SqlError> {
     validate_table_name(&table_name)?;
 
     let sql = "UPDATE ".to_owned() + &table_name + " SET funding_tx = ?2, initial_balance = ?3 WHERE rpc_id = ?1;";
+
+    Ok(sql)
+}
+
+fn update_channel_to_closed_in_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "UPDATE ".to_owned() + &table_name + " SET closure_reason = ?2, is_closed = ?3 WHERE rpc_id = ?1;";
 
     Ok(sql)
 }
@@ -546,7 +549,6 @@ impl SqlStorage for LightningPersister {
         let rpc_id = rpc_id.to_string();
         let channel_id = details.channel_id;
         let counterparty_node_id = details.counterparty_node_id;
-        let counterparty_node_address = details.counterparty_node_address;
         let funding_tx = details.funding_tx;
         let initial_balance = details.initial_balance.to_string();
         let closing_tx = details.closing_tx;
@@ -554,15 +556,12 @@ impl SqlStorage for LightningPersister {
         let closure_reason = details.closure_reason;
         let is_outbound = (details.is_outbound as i32).to_string();
         let is_public = (details.is_public as i32).to_string();
-        let is_pending = (details.is_pending as i32).to_string();
-        let is_open = (details.is_open as i32).to_string();
         let is_closed = (details.is_closed as i32).to_string();
 
         let params = [
             rpc_id,
             channel_id,
             counterparty_node_id,
-            counterparty_node_address,
             funding_tx,
             initial_balance,
             closing_tx,
@@ -570,8 +569,6 @@ impl SqlStorage for LightningPersister {
             closure_reason,
             is_outbound,
             is_public,
-            is_pending,
-            is_open,
             is_closed,
         ];
 
@@ -627,6 +624,24 @@ impl SqlStorage for LightningPersister {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
             sql_transaction.execute(&update_funding_tx_in_sql(&for_coin)?, &params)?;
+            sql_transaction.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_channel_to_closed(&self, rpc_id: u64, closure_reason: String) -> Result<(), Self::Error> {
+        let for_coin = self.storage_ticker.clone();
+        let rpc_id = rpc_id.to_string();
+        let is_closed = "1".to_string();
+
+        let params = [rpc_id, closure_reason, is_closed];
+
+        let sqlite_connection = self.sqlite_connection.clone();
+        async_blocking(move || {
+            let mut conn = sqlite_connection.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+            sql_transaction.execute(&update_channel_to_closed_in_sql(&for_coin)?, &params)?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -900,7 +915,6 @@ mod tests {
         let mut expected_channel_details = SqlChannelDetails::new(
             [0; 32],
             PublicKey::from_str("038863cf8ab91046230f561cd5b386cbff8309fa02e3f0c3ed161a3aeb64a643b9").unwrap(),
-            "127.0.0.1:9735".parse().unwrap(),
             2000,
             true,
             true,
@@ -930,6 +944,13 @@ mod tests {
         expected_channel_details.initial_balance = 3000;
 
         let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
-        assert_eq!(expected_channel_details, actual_channel_details)
+        assert_eq!(expected_channel_details, actual_channel_details);
+
+        block_on(persister.update_channel_to_closed(2, "the channel was cooperatively closed".into())).unwrap();
+        expected_channel_details.closure_reason = "the channel was cooperatively closed".into();
+        expected_channel_details.is_closed = true;
+
+        let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
+        assert_eq!(expected_channel_details, actual_channel_details);
     }
 }

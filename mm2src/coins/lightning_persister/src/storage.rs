@@ -37,7 +37,6 @@ pub trait FileSystemStorage {
 pub struct SqlChannelDetails {
     pub channel_id: String,
     pub counterparty_node_id: String,
-    pub counterparty_node_address: String,
     pub funding_tx: String,
     pub initial_balance: u64,
     pub closing_tx: String,
@@ -45,8 +44,6 @@ pub struct SqlChannelDetails {
     pub closure_reason: String,
     pub is_outbound: bool,
     pub is_public: bool,
-    pub is_pending: bool,
-    pub is_open: bool,
     pub is_closed: bool,
 }
 
@@ -54,7 +51,6 @@ impl SqlChannelDetails {
     pub fn new(
         channel_id: [u8; 32],
         counterparty_node_id: PublicKey,
-        counterparty_node_address: SocketAddr,
         initial_balance: u64,
         is_outbound: bool,
         is_public: bool,
@@ -62,7 +58,6 @@ impl SqlChannelDetails {
         SqlChannelDetails {
             channel_id: hex::encode(channel_id),
             counterparty_node_id: counterparty_node_id.to_string(),
-            counterparty_node_address: counterparty_node_address.to_string(),
             funding_tx: "".into(),
             initial_balance,
             closing_tx: "".into(),
@@ -70,8 +65,6 @@ impl SqlChannelDetails {
             closure_reason: "".into(),
             is_outbound,
             is_public,
-            is_pending: true,
-            is_open: false,
             is_closed: false,
         }
     }
@@ -98,4 +91,6 @@ pub trait SqlStorage {
         funding_tx: String,
         initial_balance: u64,
     ) -> Result<(), Self::Error>;
+
+    async fn update_channel_to_closed(&self, rpc_id: u64, closure_reason: String) -> Result<(), Self::Error>;
 }
