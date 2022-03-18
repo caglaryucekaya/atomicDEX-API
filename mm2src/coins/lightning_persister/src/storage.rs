@@ -4,6 +4,7 @@ use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
 use parking_lot::Mutex as PaMutex;
 use secp256k1::PublicKey;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -33,7 +34,7 @@ pub trait FileSystemStorage {
     async fn save_scorer(&self, scorer: Arc<Mutex<Scorer>>) -> Result<(), Self::Error>;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SqlChannelDetails {
     pub channel_id: String,
     pub counterparty_node_id: String,
@@ -93,4 +94,6 @@ pub trait SqlStorage {
     ) -> Result<(), Self::Error>;
 
     async fn update_channel_to_closed(&self, rpc_id: u64, closure_reason: String) -> Result<(), Self::Error>;
+
+    async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error>;
 }

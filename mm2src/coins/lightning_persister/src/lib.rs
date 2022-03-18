@@ -108,7 +108,7 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
     Ok(sql)
 }
 
-fn insert_channel_in_sql(for_coin: &str) -> Result<String, SqlError> {
+fn insert_channel_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
@@ -148,12 +148,12 @@ fn get_last_channel_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT MAX(rpc_id) FROM ".to_owned() + &table_name + ";";
+    let sql = "SELECT IFNULL(MAX(rpc_id), 0) FROM ".to_owned() + &table_name + ";";
 
     Ok(sql)
 }
 
-fn update_funding_tx_in_sql(for_coin: &str) -> Result<String, SqlError> {
+fn update_funding_tx_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
@@ -162,11 +162,20 @@ fn update_funding_tx_in_sql(for_coin: &str) -> Result<String, SqlError> {
     Ok(sql)
 }
 
-fn update_channel_to_closed_in_sql(for_coin: &str) -> Result<String, SqlError> {
+fn update_channel_to_closed_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
     let sql = "UPDATE ".to_owned() + &table_name + " SET closure_reason = ?2, is_closed = ?3 WHERE rpc_id = ?1;";
+
+    Ok(sql)
+}
+
+fn get_closed_channels_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = channels_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "SELECT channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE is_closed = 1;";
 
     Ok(sql)
 }
@@ -576,7 +585,7 @@ impl SqlStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&insert_channel_in_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&insert_channel_sql(&for_coin)?, &params)?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -623,7 +632,7 @@ impl SqlStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&update_funding_tx_in_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&update_funding_tx_sql(&for_coin)?, &params)?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -641,9 +650,23 @@ impl SqlStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&update_channel_to_closed_in_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&update_channel_to_closed_sql(&for_coin)?, &params)?;
             sql_transaction.commit()?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error> {
+        let sql = get_closed_channels_sql(self.storage_ticker.as_str())?;
+        let sqlite_connection = self.sqlite_connection.clone();
+
+        async_blocking(move || {
+            let conn = sqlite_connection.lock().unwrap();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query(NO_PARAMS)?;
+            let result = rows.mapped(channel_details_from_row).collect::<Result<_, _>>()?;
+            Ok(result)
         })
         .await
     }
@@ -909,6 +932,9 @@ mod tests {
 
         block_on(persister.init_sql()).unwrap();
 
+        let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id()).unwrap();
+        assert_eq!(last_channel_rpc_id, 0);
+
         let channel = block_on(persister.get_channel_from_sql(1)).unwrap();
         assert!(channel.is_none());
 
@@ -952,5 +978,13 @@ mod tests {
 
         let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
         assert_eq!(expected_channel_details, actual_channel_details);
+
+        let closed_channels = block_on(persister.get_closed_channels()).unwrap();
+        assert_eq!(closed_channels.len(), 1);
+        assert_eq!(expected_channel_details, closed_channels[0]);
+
+        block_on(persister.update_channel_to_closed(1, "the channel was cooperatively closed".into())).unwrap();
+        let closed_channels = block_on(persister.get_closed_channels()).unwrap();
+        assert_eq!(closed_channels.len(), 2);
     }
 }

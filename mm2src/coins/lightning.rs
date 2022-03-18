@@ -866,7 +866,8 @@ impl From<ChannelDetails> for ChannelDetailsForRPC {
 
 #[derive(Serialize)]
 pub struct ListChannelsResponse {
-    channels: Vec<ChannelDetailsForRPC>,
+    open_channels: Vec<ChannelDetailsForRPC>,
+    closed_channels: Vec<SqlChannelDetails>,
 }
 
 pub async fn list_channels(ctx: MmArc, req: ListChannelsRequest) -> ListChannelsResult<ListChannelsResponse> {
@@ -875,14 +876,19 @@ pub async fn list_channels(ctx: MmArc, req: ListChannelsRequest) -> ListChannels
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(ListChannelsError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let channels = ln_coin
+    let open_channels = ln_coin
         .channel_manager
         .list_channels()
         .into_iter()
         .map(From::from)
         .collect();
 
-    Ok(ListChannelsResponse { channels })
+    let closed_channels = ln_coin.persister.get_closed_channels().await?;
+
+    Ok(ListChannelsResponse {
+        open_channels,
+        closed_channels,
+    })
 }
 
 #[derive(Deserialize)]

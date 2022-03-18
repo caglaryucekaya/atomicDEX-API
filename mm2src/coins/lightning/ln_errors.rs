@@ -221,6 +221,8 @@ pub enum ListChannelsError {
     UnsupportedCoin(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
 }
 
 impl HttpStatusCode for ListChannelsError {
@@ -228,6 +230,7 @@ impl HttpStatusCode for ListChannelsError {
         match self {
             ListChannelsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             ListChannelsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
+            ListChannelsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -238,6 +241,10 @@ impl From<CoinFindError> for ListChannelsError {
             CoinFindError::NoSuchCoin { coin } => ListChannelsError::NoSuchCoin(coin),
         }
     }
+}
+
+impl From<SqlError> for ListChannelsError {
+    fn from(err: SqlError) -> ListChannelsError { ListChannelsError::SqlError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
