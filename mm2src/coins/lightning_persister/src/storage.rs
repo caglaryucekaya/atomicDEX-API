@@ -36,6 +36,7 @@ pub trait FileSystemStorage {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SqlChannelDetails {
+    pub rpc_id: u64,
     pub channel_id: String,
     pub counterparty_node_id: String,
     pub funding_tx: String,
@@ -50,6 +51,7 @@ pub struct SqlChannelDetails {
 
 impl SqlChannelDetails {
     pub fn new(
+        rpc_id: u64,
         channel_id: [u8; 32],
         counterparty_node_id: PublicKey,
         initial_balance: u64,
@@ -57,6 +59,7 @@ impl SqlChannelDetails {
         is_public: bool,
     ) -> Self {
         SqlChannelDetails {
+            rpc_id,
             channel_id: hex::encode(channel_id),
             counterparty_node_id: counterparty_node_id.to_string(),
             funding_tx: "".into(),
@@ -80,7 +83,7 @@ pub trait SqlStorage {
 
     async fn is_sql_initialized(&self) -> Result<bool, Self::Error>;
 
-    async fn add_channel_to_sql(&self, rpc_id: u64, details: SqlChannelDetails) -> Result<(), Self::Error>;
+    async fn add_channel_to_sql(&self, details: SqlChannelDetails) -> Result<(), Self::Error>;
 
     async fn get_channel_from_sql(&self, rpc_id: u64) -> Result<Option<SqlChannelDetails>, Self::Error>;
 

@@ -256,6 +256,8 @@ pub enum GetChannelDetailsError {
     NoSuchCoin(String),
     #[display(fmt = "Channel with rpc id: {} is not found", _0)]
     NoSuchChannel(u64),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
 }
 
 impl HttpStatusCode for GetChannelDetailsError {
@@ -264,6 +266,7 @@ impl HttpStatusCode for GetChannelDetailsError {
             GetChannelDetailsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             GetChannelDetailsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
             GetChannelDetailsError::NoSuchChannel(_) => StatusCode::NOT_FOUND,
+            GetChannelDetailsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -274,6 +277,10 @@ impl From<CoinFindError> for GetChannelDetailsError {
             CoinFindError::NoSuchCoin { coin } => GetChannelDetailsError::NoSuchCoin(coin),
         }
     }
+}
+
+impl From<SqlError> for GetChannelDetailsError {
+    fn from(err: SqlError) -> GetChannelDetailsError { GetChannelDetailsError::SqlError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]

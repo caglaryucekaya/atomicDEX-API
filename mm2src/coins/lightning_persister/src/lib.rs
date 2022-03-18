@@ -123,23 +123,24 @@ fn select_channel_from_table_by_rpc_id_sql(for_coin: &str) -> Result<String, Sql
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
+    let sql = "SELECT rpc_id, channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
 
     Ok(sql)
 }
 
 fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError> {
     let channel_details = SqlChannelDetails {
-        channel_id: row.get(0)?,
-        counterparty_node_id: row.get(1)?,
-        funding_tx: row.get(2)?,
-        initial_balance: row.get::<_, u32>(3)? as u64,
-        closing_tx: row.get(4)?,
-        closing_balance: row.get::<_, u32>(5)? as u64,
-        closure_reason: row.get(6)?,
-        is_outbound: row.get(7)?,
-        is_public: row.get(8)?,
-        is_closed: row.get(9)?,
+        rpc_id: row.get::<_, u32>(0)? as u64,
+        channel_id: row.get(1)?,
+        counterparty_node_id: row.get(2)?,
+        funding_tx: row.get(3)?,
+        initial_balance: row.get::<_, u32>(4)? as u64,
+        closing_tx: row.get(5)?,
+        closing_balance: row.get::<_, u32>(6)? as u64,
+        closure_reason: row.get(7)?,
+        is_outbound: row.get(8)?,
+        is_public: row.get(9)?,
+        is_closed: row.get(10)?,
     };
     Ok(channel_details)
 }
@@ -175,7 +176,7 @@ fn get_closed_channels_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE is_closed = 1;";
+    let sql = "SELECT rpc_id, channel_id, counterparty_node_id, funding_tx, initial_balance, closing_tx, closing_balance, closure_reason, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE is_closed = 1;";
 
     Ok(sql)
 }
@@ -553,9 +554,9 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn add_channel_to_sql(&self, rpc_id: u64, details: SqlChannelDetails) -> Result<(), Self::Error> {
+    async fn add_channel_to_sql(&self, details: SqlChannelDetails) -> Result<(), Self::Error> {
         let for_coin = self.storage_ticker.clone();
-        let rpc_id = rpc_id.to_string();
+        let rpc_id = details.rpc_id.to_string();
         let channel_id = details.channel_id;
         let counterparty_node_id = details.counterparty_node_id;
         let funding_tx = details.funding_tx;
@@ -939,13 +940,14 @@ mod tests {
         assert!(channel.is_none());
 
         let mut expected_channel_details = SqlChannelDetails::new(
+            1,
             [0; 32],
             PublicKey::from_str("038863cf8ab91046230f561cd5b386cbff8309fa02e3f0c3ed161a3aeb64a643b9").unwrap(),
             2000,
             true,
             true,
         );
-        block_on(persister.add_channel_to_sql(1, expected_channel_details.clone())).unwrap();
+        block_on(persister.add_channel_to_sql(expected_channel_details.clone())).unwrap();
         let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id()).unwrap();
         assert_eq!(last_channel_rpc_id, 1);
 
@@ -953,10 +955,11 @@ mod tests {
         assert_eq!(expected_channel_details, actual_channel_details);
 
         // must fail because we are adding channel with the same rpc_id
-        block_on(persister.add_channel_to_sql(1, expected_channel_details.clone())).unwrap_err();
+        block_on(persister.add_channel_to_sql(expected_channel_details.clone())).unwrap_err();
         assert_eq!(last_channel_rpc_id, 1);
 
-        block_on(persister.add_channel_to_sql(2, expected_channel_details.clone())).unwrap();
+        expected_channel_details.rpc_id = 2;
+        block_on(persister.add_channel_to_sql(expected_channel_details.clone())).unwrap();
         let last_channel_rpc_id = block_on(persister.get_last_channel_rpc_id()).unwrap();
         assert_eq!(last_channel_rpc_id, 2);
 

@@ -789,6 +789,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
     }
 
     let pending_channel_details = SqlChannelDetails::new(
+        rpc_channel_id,
         temp_channel_id,
         node_pubkey,
         amount_in_sat,
@@ -803,10 +804,7 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         .save_nodes_addresses(ln_coin.open_channels_nodes)
         .await?;
 
-    ln_coin
-        .persister
-        .add_channel_to_sql(rpc_channel_id, pending_channel_details)
-        .await?;
+    ln_coin.persister.add_channel_to_sql(pending_channel_details).await?;
 
     Ok(OpenChannelResponse {
         rpc_channel_id,
@@ -898,8 +896,10 @@ pub struct GetChannelDetailsRequest {
 }
 
 #[derive(Serialize)]
-pub struct GetChannelDetailsResponse {
-    channel_details: ChannelDetailsForRPC,
+#[serde(tag = "status", content = "details")]
+pub enum GetChannelDetailsResponse {
+    Open(ChannelDetailsForRPC),
+    Closed(SqlChannelDetails),
 }
 
 pub async fn get_channel_details(
@@ -911,15 +911,23 @@ pub async fn get_channel_details(
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(GetChannelDetailsError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let channel_details = ln_coin
+    let channel_details = match ln_coin
         .channel_manager
         .list_channels()
         .into_iter()
         .find(|chan| chan.user_channel_id == req.rpc_channel_id)
-        .ok_or(GetChannelDetailsError::NoSuchChannel(req.rpc_channel_id))?
-        .into();
+    {
+        Some(details) => GetChannelDetailsResponse::Open(details.into()),
+        None => GetChannelDetailsResponse::Closed(
+            ln_coin
+                .persister
+                .get_channel_from_sql(req.rpc_channel_id)
+                .await?
+                .ok_or(GetChannelDetailsError::NoSuchChannel(req.rpc_channel_id))?,
+        ),
+    };
 
-    Ok(GetChannelDetailsResponse { channel_details })
+    Ok(channel_details)
 }
 
 #[derive(Deserialize)]
