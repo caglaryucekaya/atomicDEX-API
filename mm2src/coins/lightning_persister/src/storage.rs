@@ -39,11 +39,13 @@ pub struct SqlChannelDetails {
     pub rpc_id: u64,
     pub channel_id: String,
     pub counterparty_node_id: String,
-    pub funding_tx: String,
-    pub initial_balance: u64,
-    pub closing_tx: String,
-    pub closing_balance: u64,
-    pub closure_reason: String,
+    pub funding_tx: Option<String>,
+    pub funding_value: Option<u64>,
+    pub closing_tx: Option<String>,
+    pub closing_balance: Option<u64>,
+    pub closure_reason: Option<String>,
+    #[serde(skip_serializing)]
+    pub funding_generated_in_block: Option<u64>,
     pub is_outbound: bool,
     pub is_public: bool,
     pub is_closed: bool,
@@ -54,7 +56,6 @@ impl SqlChannelDetails {
         rpc_id: u64,
         channel_id: [u8; 32],
         counterparty_node_id: PublicKey,
-        initial_balance: u64,
         is_outbound: bool,
         is_public: bool,
     ) -> Self {
@@ -62,11 +63,12 @@ impl SqlChannelDetails {
             rpc_id,
             channel_id: hex::encode(channel_id),
             counterparty_node_id: counterparty_node_id.to_string(),
-            funding_tx: "".into(),
-            initial_balance,
-            closing_tx: "".into(),
-            closing_balance: 0,
-            closure_reason: "".into(),
+            funding_tx: None,
+            funding_value: None,
+            funding_generated_in_block: None,
+            closing_tx: None,
+            closing_balance: None,
+            closure_reason: None,
             is_outbound,
             is_public,
             is_closed: false,
@@ -93,10 +95,13 @@ pub trait SqlStorage {
         &self,
         rpc_id: u64,
         funding_tx: String,
-        initial_balance: u64,
+        funding_value: u64,
+        funding_generated_in_block: u64,
     ) -> Result<(), Self::Error>;
 
     async fn update_channel_to_closed(&self, rpc_id: u64, closure_reason: String) -> Result<(), Self::Error>;
+
+    async fn add_closing_tx_to_sql(&self, rpc_id: u64, closing_tx_: String) -> Result<(), Self::Error>;
 
     async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error>;
 }

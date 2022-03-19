@@ -792,7 +792,6 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
         rpc_channel_id,
         temp_channel_id,
         node_pubkey,
-        amount_in_sat,
         true,
         user_config.channel_options.announced_channel,
     );

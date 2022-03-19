@@ -2,8 +2,9 @@ use super::*;
 use bitcoin::blockdata::script::Script;
 use bitcoin::blockdata::transaction::Transaction;
 use common::executor::{spawn, Timer};
-use common::log;
+use common::{log, now_ms};
 use core::time::Duration;
+use futures::compat::Future01CompatExt;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::keysinterface::SpendableOutputDescriptor;
 use lightning::util::events::{Event, EventHandler, PaymentPurpose};
@@ -171,14 +172,19 @@ impl LightningEventHandler {
             log::error!("{:?}", e);
             return;
         }
+        let platform = self.platform.clone();
         let persister = self.persister.clone();
         spawn(async move {
-            if let Err(e) = persister
-                .add_funding_tx_to_sql(user_channel_id, funding_txid.to_string(), channel_value_satoshis)
+            let current_block = platform.coin.current_block().compat().await.unwrap_or_default();
+            persister
+                .add_funding_tx_to_sql(
+                    user_channel_id,
+                    funding_txid.to_string(),
+                    channel_value_satoshis,
+                    current_block,
+                )
                 .await
-            {
-                log::error!("{}", e);
-            }
+                .error_log();
         });
     }
 
@@ -257,13 +263,55 @@ impl LightningEventHandler {
             reason
         );
         let persister = self.persister.clone();
+        let platform = self.platform.clone();
         // Todo: Handle inbound channels closure case after updating to latest version of rust-lightning
         // as it has a new OpenChannelRequest event where we can give an inbound channel a user_channel_id
         // other than 0 in sql
         if user_channel_id != 0 {
             spawn(async move {
-                if let Err(e) = persister.update_channel_to_closed(user_channel_id, reason).await {
-                    log::error!("{}", e);
+                persister
+                    .update_channel_to_closed(user_channel_id, reason)
+                    .await
+                    .error_log();
+                if let Ok(Some(channel_details)) = persister
+                    .get_channel_from_sql(user_channel_id)
+                    .await
+                    .error_log_passthrough()
+                {
+                    if let Some(tx_id) = channel_details.funding_tx {
+                        if let Ok(tx_hash) = H256Json::from_str(&tx_id).error_log_passthrough() {
+                            if let Ok(funding_tx_bytes) = platform
+                                .coin
+                                .as_ref()
+                                .rpc_client
+                                .get_transaction_bytes(&tx_hash)
+                                .compat()
+                                .await
+                                .error_log_passthrough()
+                            {
+                                if let Ok(TransactionEnum::UtxoTx(closing_tx)) = platform
+                                    .coin
+                                    .wait_for_tx_spend(
+                                        &funding_tx_bytes.into_vec(),
+                                        (now_ms() / 1000) + 3600,
+                                        channel_details.funding_generated_in_block.unwrap_or_default(),
+                                        &None,
+                                    )
+                                    .compat()
+                                    .await
+                                    .error_log_passthrough()
+                                {
+                                    persister
+                                        .add_closing_tx_to_sql(
+                                            user_channel_id,
+                                            closing_tx.hash().reversed().to_string(),
+                                        )
+                                        .await
+                                        .error_log();
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }
