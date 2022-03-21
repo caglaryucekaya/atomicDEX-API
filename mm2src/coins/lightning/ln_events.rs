@@ -367,6 +367,29 @@ impl LightningEventHandler {
                 return;
             },
         };
+
         self.platform.broadcast_transaction(&spending_tx);
+
+        for output in outputs {
+            let (closing_txid, claimed_balance) = match output {
+                SpendableOutputDescriptor::StaticOutput { outpoint, output } => {
+                    (outpoint.txid.to_string(), output.value)
+                },
+                SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
+                    (descriptor.outpoint.txid.to_string(), descriptor.output.value)
+                },
+                SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
+                    (descriptor.outpoint.txid.to_string(), descriptor.output.value)
+                },
+            };
+            let claiming_txid = spending_tx.txid().to_string();
+            let persister = self.persister.clone();
+            spawn(async move {
+                persister
+                    .add_claiming_tx_to_sql(closing_txid, claiming_txid, claimed_balance)
+                    .await
+                    .error_log();
+            });
+        }
     }
 }

@@ -39,11 +39,18 @@ pub struct SqlChannelDetails {
     pub rpc_id: u64,
     pub channel_id: String,
     pub counterparty_node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub funding_tx: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub funding_value: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub closing_tx: Option<String>,
-    pub closing_balance: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub closure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claiming_tx: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_balance: Option<u64>,
     #[serde(skip_serializing)]
     pub funding_generated_in_block: Option<u64>,
     pub is_outbound: bool,
@@ -67,8 +74,9 @@ impl SqlChannelDetails {
             funding_value: None,
             funding_generated_in_block: None,
             closing_tx: None,
-            closing_balance: None,
             closure_reason: None,
+            claiming_tx: None,
+            claimed_balance: None,
             is_outbound,
             is_public,
             is_closed: false,
@@ -104,4 +112,11 @@ pub trait SqlStorage {
     async fn add_closing_tx_to_sql(&self, rpc_id: u64, closing_tx_: String) -> Result<(), Self::Error>;
 
     async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error>;
+
+    async fn add_claiming_tx_to_sql(
+        &self,
+        closing_tx: String,
+        claiming_tx: String,
+        claimed_balance: u64,
+    ) -> Result<(), Self::Error>;
 }
