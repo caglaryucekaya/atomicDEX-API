@@ -109,8 +109,17 @@ impl FromStr for HTLCStatus {
     }
 }
 
+#[derive(Serialize)]
+pub enum PaymentType {
+    #[serde(rename = "Outbound Payment")]
+    OutboundPayment,
+    #[serde(rename = "Inbound Payment")]
+    InboundPayment,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaymentInfo {
+    pub payment_hash: PaymentHash,
     pub preimage: Option<PaymentPreimage>,
     pub secret: Option<PaymentSecret>,
     pub amt_msat: Option<u64>,
@@ -129,16 +138,15 @@ pub trait SqlStorage {
 
     async fn add_channel_to_sql(&self, details: SqlChannelDetails) -> Result<(), Self::Error>;
 
-    async fn add_payment_to_sql(
+    async fn add_or_update_payment_in_sql(
         &self,
-        hash: PaymentHash,
         info: PaymentInfo,
-        is_outbound: bool,
+        payment_type: PaymentType,
     ) -> Result<(), Self::Error>;
 
     async fn get_channel_from_sql(&self, rpc_id: u64) -> Result<Option<SqlChannelDetails>, Self::Error>;
 
-    async fn get_payment_from_sql(&self, hash: PaymentHash) -> Result<Option<PaymentInfo>, Self::Error>;
+    async fn get_payment_from_sql(&self, hash: PaymentHash) -> Result<Option<(PaymentInfo, PaymentType)>, Self::Error>;
 
     async fn get_last_channel_rpc_id(&self) -> Result<u32, Self::Error>;
 
@@ -155,6 +163,10 @@ pub trait SqlStorage {
     async fn add_closing_tx_to_sql(&self, rpc_id: u64, closing_tx_: String) -> Result<(), Self::Error>;
 
     async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error>;
+
+    async fn get_outbound_payments(&self) -> Result<Vec<(PaymentInfo, PaymentType)>, Self::Error>;
+
+    async fn get_inbound_payments(&self) -> Result<Vec<(PaymentInfo, PaymentType)>, Self::Error>;
 
     async fn add_claiming_tx_to_sql(
         &self,

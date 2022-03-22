@@ -329,6 +329,8 @@ pub enum SendPaymentError {
     PaymentError(String),
     #[display(fmt = "Final cltv expiry delta {} is below the required minimum of {}", _0, _1)]
     CLTVExpiryError(u32, u32),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
 }
 
 impl HttpStatusCode for SendPaymentError {
@@ -338,7 +340,8 @@ impl HttpStatusCode for SendPaymentError {
             SendPaymentError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
             SendPaymentError::PaymentError(_)
             | SendPaymentError::NoRouteFound(_)
-            | SendPaymentError::CLTVExpiryError(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
+            | SendPaymentError::CLTVExpiryError(_, _)
+            | SendPaymentError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -351,6 +354,10 @@ impl From<CoinFindError> for SendPaymentError {
     }
 }
 
+impl From<SqlError> for SendPaymentError {
+    fn from(err: SqlError) -> SendPaymentError { SendPaymentError::SqlError(err.to_string()) }
+}
+
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum ListPaymentsError {
@@ -358,6 +365,8 @@ pub enum ListPaymentsError {
     UnsupportedCoin(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
 }
 
 impl HttpStatusCode for ListPaymentsError {
@@ -365,6 +374,7 @@ impl HttpStatusCode for ListPaymentsError {
         match self {
             ListPaymentsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             ListPaymentsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
+            ListPaymentsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -377,6 +387,10 @@ impl From<CoinFindError> for ListPaymentsError {
     }
 }
 
+impl From<SqlError> for ListPaymentsError {
+    fn from(err: SqlError) -> ListPaymentsError { ListPaymentsError::SqlError(err.to_string()) }
+}
+
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum GetPaymentDetailsError {
@@ -386,6 +400,8 @@ pub enum GetPaymentDetailsError {
     NoSuchCoin(String),
     #[display(fmt = "Payment with hash: {:?} is not found", _0)]
     NoSuchPayment(H256Json),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
 }
 
 impl HttpStatusCode for GetPaymentDetailsError {
@@ -394,6 +410,7 @@ impl HttpStatusCode for GetPaymentDetailsError {
             GetPaymentDetailsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             GetPaymentDetailsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
             GetPaymentDetailsError::NoSuchPayment(_) => StatusCode::NOT_FOUND,
+            GetPaymentDetailsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -404,6 +421,10 @@ impl From<CoinFindError> for GetPaymentDetailsError {
             CoinFindError::NoSuchCoin { coin } => GetPaymentDetailsError::NoSuchCoin(coin),
         }
     }
+}
+
+impl From<SqlError> for GetPaymentDetailsError {
+    fn from(err: SqlError) -> GetPaymentDetailsError { GetPaymentDetailsError::SqlError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]

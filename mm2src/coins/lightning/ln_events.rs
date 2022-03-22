@@ -11,7 +11,6 @@ use lightning::util::events::{Event, EventHandler, PaymentPurpose};
 use rand::Rng;
 use script::{Builder, SignatureVersion};
 use secp256k1::Secp256k1;
-use std::collections::hash_map::Entry;
 use std::convert::TryFrom;
 use std::sync::Arc;
 use utxo_signer::with_key_pair::sign_tx;
@@ -21,8 +20,6 @@ pub struct LightningEventHandler {
     channel_manager: Arc<ChannelManager>,
     keys_manager: Arc<KeysManager>,
     persister: Arc<LightningPersister>,
-    inbound_payments: PaymentsMapShared,
-    outbound_payments: PaymentsMapShared,
 }
 
 impl EventHandler for LightningEventHandler {
@@ -45,7 +42,7 @@ impl EventHandler for LightningEventHandler {
                 fee_paid_msat,
                 ..
             } => self.handle_payment_sent(*payment_preimage, *payment_hash, *fee_paid_msat),
-            Event::PaymentFailed { payment_hash, .. } => self.handle_payment_failed(payment_hash),
+            Event::PaymentFailed { payment_hash, .. } => self.handle_payment_failed(*payment_hash),
             Event::PendingHTLCsForwardable { time_forwardable } => self.handle_pending_htlcs_forwards(*time_forwardable),
             Event::SpendableOutputs { outputs } => self.handle_spendable_outputs(outputs),
             // Todo: an RPC for total amount earned
@@ -128,16 +125,12 @@ impl LightningEventHandler {
         channel_manager: Arc<ChannelManager>,
         keys_manager: Arc<KeysManager>,
         persister: Arc<LightningPersister>,
-        inbound_payments: PaymentsMapShared,
-        outbound_payments: PaymentsMapShared,
     ) -> Self {
         LightningEventHandler {
             platform,
             channel_manager,
             keys_manager,
             persister,
-            inbound_payments,
-            outbound_payments,
         }
     }
 
@@ -214,24 +207,23 @@ impl LightningEventHandler {
             },
             false => HTLCStatus::Failed,
         };
-        let mut payments = self.inbound_payments.lock();
-        match payments.entry(payment_hash) {
-            Entry::Occupied(mut e) => {
-                let payment = e.get_mut();
-                payment.status = status;
-                payment.preimage = Some(payment_preimage);
-                payment.secret = payment_secret;
-            },
-            Entry::Vacant(e) => {
-                e.insert(PaymentInfo {
-                    preimage: Some(payment_preimage),
-                    secret: payment_secret,
-                    amt_msat: Some(amt),
-                    fee_paid_msat: None,
-                    status,
-                });
-            },
-        }
+        let payment_info = PaymentInfo {
+            payment_hash,
+            preimage: Some(payment_preimage),
+            secret: payment_secret,
+            amt_msat: Some(amt),
+            fee_paid_msat: None,
+            status,
+        };
+        let persister = self.persister.clone();
+        spawn(async move {
+            if let Err(e) = persister
+                .add_or_update_payment_in_sql(payment_info, PaymentType::InboundPayment)
+                .await
+            {
+                log::error!("{}", e);
+            }
+        });
     }
 
     fn handle_payment_sent(
@@ -244,16 +236,31 @@ impl LightningEventHandler {
             "Handling PaymentSent event for payment_hash: {}",
             hex::encode(payment_hash.0)
         );
-        if let Some(payment) = self.outbound_payments.lock().get_mut(&payment_hash) {
-            payment.preimage = Some(payment_preimage);
-            payment.status = HTLCStatus::Succeeded;
-            payment.fee_paid_msat = fee_paid_msat;
-            log::info!(
-                "Successfully sent payment of {} millisatoshis with payment hash {}",
-                payment.amt_msat.unwrap_or_default(),
-                hex::encode(payment_hash.0)
-            );
-        }
+        let persister = self.persister.clone();
+        spawn(async move {
+            if let Ok(Some((mut payment_info, payment_type))) = persister
+                .get_payment_from_sql(payment_hash)
+                .await
+                .error_log_passthrough()
+            {
+                payment_info.preimage = Some(payment_preimage);
+                payment_info.status = HTLCStatus::Succeeded;
+                payment_info.fee_paid_msat = fee_paid_msat;
+                let amt_msat = payment_info.amt_msat;
+                if let Err(e) = persister
+                    .add_or_update_payment_in_sql(payment_info, payment_type)
+                    .await
+                    .error_log_passthrough()
+                {
+                    log::error!("{}", e);
+                }
+                log::info!(
+                    "Successfully sent payment of {} millisatoshis with payment hash {}",
+                    amt_msat.unwrap_or_default(),
+                    hex::encode(payment_hash.0)
+                );
+            }
+        });
     }
 
     fn handle_channel_closed(&self, channel_id: [u8; 32], user_channel_id: u64, reason: String) {
@@ -317,16 +324,24 @@ impl LightningEventHandler {
         }
     }
 
-    fn handle_payment_failed(&self, payment_hash: &PaymentHash) {
+    fn handle_payment_failed(&self, payment_hash: PaymentHash) {
         log::info!(
             "Handling PaymentFailed event for payment_hash: {}",
             hex::encode(payment_hash.0)
         );
-        let mut outbound_payments = self.outbound_payments.lock();
-        let outbound_payment = outbound_payments.get_mut(payment_hash);
-        if let Some(payment) = outbound_payment {
-            payment.status = HTLCStatus::Failed;
-        }
+        let persister = self.persister.clone();
+        spawn(async move {
+            if let Ok(Some((mut payment_info, payment_type))) = persister
+                .get_payment_from_sql(payment_hash)
+                .await
+                .error_log_passthrough()
+            {
+                payment_info.status = HTLCStatus::Failed;
+                if let Err(e) = persister.add_or_update_payment_in_sql(payment_info, payment_type).await {
+                    log::error!("{}", e);
+                }
+            }
+        });
     }
 
     fn handle_pending_htlcs_forwards(&self, time_forwardable: Duration) {

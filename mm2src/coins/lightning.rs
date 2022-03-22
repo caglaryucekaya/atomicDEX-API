@@ -42,7 +42,7 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
-use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo,
+use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo, PaymentType,
                                    SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
@@ -72,8 +72,6 @@ use std::sync::{Arc, Mutex};
 
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<LogState>>;
 type InvoicePayer<E> = payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<Mutex<Scorer>>, Arc<LogState>, E>;
-type PaymentsMap = HashMap<PaymentHash, PaymentInfo>;
-type PaymentsMapShared = Arc<PaMutex<PaymentsMap>>;
 
 #[derive(Clone)]
 pub struct LightningCoin {
@@ -94,10 +92,6 @@ pub struct LightningCoin {
     pub invoice_payer: Arc<InvoicePayer<Arc<LightningEventHandler>>>,
     /// The lightning node persister that takes care of writing/reading data from storage.
     pub persister: Arc<LightningPersister>,
-    /// The mutex storing the inbound payments info.
-    pub inbound_payments: PaymentsMapShared,
-    /// The mutex storing the outbound payments info.
-    pub outbound_payments: PaymentsMapShared,
     /// The mutex storing the addresses of the nodes that the lightning node has open channels with,
     /// these addresses are used for reconnecting.
     pub open_channels_nodes: NodesAddressesMapShared,
@@ -128,19 +122,20 @@ impl LightningCoin {
             })
     }
 
-    fn pay_invoice(&self, invoice: Invoice) -> SendPaymentResult<(PaymentHash, PaymentInfo)> {
+    fn pay_invoice(&self, invoice: Invoice) -> SendPaymentResult<PaymentInfo> {
         self.invoice_payer
             .pay_invoice(&invoice)
             .map_to_mm(|e| SendPaymentError::PaymentError(format!("{:?}", e)))?;
         let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
         let payment_secret = Some(*invoice.payment_secret());
-        Ok((payment_hash, PaymentInfo {
+        Ok(PaymentInfo {
+            payment_hash,
             preimage: None,
             secret: payment_secret,
             amt_msat: invoice.amount_milli_satoshis(),
             fee_paid_msat: None,
             status: HTLCStatus::Pending,
-        }))
+        })
     }
 
     fn keysend(
@@ -148,7 +143,7 @@ impl LightningCoin {
         destination: PublicKey,
         amount_msat: u64,
         final_cltv_expiry_delta: u32,
-    ) -> SendPaymentResult<(PaymentHash, PaymentInfo)> {
+    ) -> SendPaymentResult<PaymentInfo> {
         if final_cltv_expiry_delta < MIN_FINAL_CLTV_EXPIRY {
             return MmError::err(SendPaymentError::CLTVExpiryError(
                 final_cltv_expiry_delta,
@@ -161,13 +156,14 @@ impl LightningCoin {
             .map_to_mm(|e| SendPaymentError::PaymentError(format!("{:?}", e)))?;
         let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
 
-        Ok((payment_hash, PaymentInfo {
+        Ok(PaymentInfo {
+            payment_hash,
             preimage: Some(payment_preimage),
             secret: None,
             amt_msat: Some(amount_msat),
             fee_paid_msat: None,
             status: HTLCStatus::Pending,
-        }))
+        })
     }
 }
 
@@ -549,9 +545,6 @@ pub async fn start_lightning(
     )
     .await?;
 
-    let inbound_payments = Arc::new(PaMutex::new(HashMap::new()));
-    let outbound_payments = Arc::new(PaMutex::new(HashMap::new()));
-
     // Initialize the event handler
     let event_handler = Arc::new(ln_events::LightningEventHandler::new(
         // It's safe to use unwrap here for now until implementing Native Client for Lightning
@@ -559,8 +552,6 @@ pub async fn start_lightning(
         channel_manager.clone(),
         keys_manager.clone(),
         persister.clone(),
-        inbound_payments.clone(),
-        outbound_payments.clone(),
     ));
 
     // Initialize routing Scorer
@@ -624,8 +615,6 @@ pub async fn start_lightning(
         keys_manager,
         invoice_payer,
         persister,
-        inbound_payments,
-        outbound_payments,
         open_channels_nodes,
     })
 }
@@ -1003,7 +992,7 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
                 node_pubkey
             ));
     }
-    let (payment_hash, payment_info) = match req.payment {
+    let payment_info = match req.payment {
         Payment::Invoice { invoice } => ln_coin.pay_invoice(invoice.into())?,
         Payment::Keysend {
             destination,
@@ -1011,10 +1000,12 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
             expiry,
         } => ln_coin.keysend(destination.into(), amount_in_msat, expiry)?,
     };
-    let mut outbound_payments = ln_coin.outbound_payments.lock();
-    outbound_payments.insert(payment_hash, payment_info);
+    ln_coin
+        .persister
+        .add_or_update_payment_in_sql(payment_info.clone(), PaymentType::OutboundPayment)
+        .await?;
     Ok(SendPaymentResponse {
-        payment_hash: payment_hash.0.into(),
+        payment_hash: payment_info.payment_hash.0.into(),
     })
 }
 
@@ -1042,8 +1033,8 @@ impl From<PaymentInfo> for PaymentInfoForRPC {
 
 #[derive(Serialize)]
 pub struct ListPaymentsResponse {
-    pub inbound_payments: HashMap<H256Json, PaymentInfoForRPC>,
-    pub outbound_payments: HashMap<H256Json, PaymentInfoForRPC>,
+    pub inbound_payments: Vec<PaymentInfoForRPC>,
+    pub outbound_payments: Vec<PaymentInfoForRPC>,
 }
 
 pub async fn list_payments(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResult<ListPaymentsResponse> {
@@ -1053,18 +1044,18 @@ pub async fn list_payments(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResu
         _ => return MmError::err(ListPaymentsError::UnsupportedCoin(coin.ticker().to_string())),
     };
     let inbound_payments = ln_coin
-        .inbound_payments
-        .lock()
-        .clone()
+        .persister
+        .get_inbound_payments()
+        .await?
         .into_iter()
-        .map(|(hash, info)| (hash.0.into(), info.into()))
+        .map(|(info, _)| info.into())
         .collect();
     let outbound_payments = ln_coin
-        .outbound_payments
-        .lock()
-        .clone()
+        .persister
+        .get_outbound_payments()
+        .await?
         .into_iter()
-        .map(|(hash, info)| (hash.0.into(), info.into()))
+        .map(|(info, _)| info.into())
         .collect();
 
     Ok(ListPaymentsResponse {
@@ -1077,14 +1068,6 @@ pub async fn list_payments(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResu
 pub struct GetPaymentDetailsRequest {
     pub coin: String,
     pub payment_hash: H256Json,
-}
-
-#[derive(Serialize)]
-enum PaymentType {
-    #[serde(rename = "Outbound Payment")]
-    OutboundPayment,
-    #[serde(rename = "Inbound Payment")]
-    InboundPayment,
 }
 
 #[derive(Serialize)]
@@ -1103,17 +1086,14 @@ pub async fn get_payment_details(
         _ => return MmError::err(GetPaymentDetailsError::UnsupportedCoin(coin.ticker().to_string())),
     };
 
-    if let Some(payment_info) = ln_coin.outbound_payments.lock().get(&PaymentHash(req.payment_hash.0)) {
+    if let Some((payment_info, payment_type)) = ln_coin
+        .persister
+        .get_payment_from_sql(PaymentHash(req.payment_hash.0))
+        .await?
+    {
         return Ok(GetPaymentDetailsResponse {
-            payment_type: PaymentType::OutboundPayment,
-            payment_details: payment_info.clone().into(),
-        });
-    }
-
-    if let Some(payment_info) = ln_coin.inbound_payments.lock().get(&PaymentHash(req.payment_hash.0)) {
-        return Ok(GetPaymentDetailsResponse {
-            payment_type: PaymentType::InboundPayment,
-            payment_details: payment_info.clone().into(),
+            payment_type,
+            payment_details: payment_info.into(),
         });
     }
 
