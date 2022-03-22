@@ -13,7 +13,8 @@ extern crate lightning;
 extern crate secp256k1;
 extern crate serde_json;
 
-use crate::storage::{FileSystemStorage, NodesAddressesMap, NodesAddressesMapShared, SqlChannelDetails, SqlStorage};
+use crate::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMap, NodesAddressesMapShared, PaymentInfo,
+                     SqlChannelDetails, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
 use bitcoin::blockdata::constants::genesis_block;
@@ -22,7 +23,7 @@ use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::Network;
 use common::async_blocking;
 use common::fs::check_dir_operations;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, NO_PARAMS};
+use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, ToSql, NO_PARAMS};
 use db_common::sqlite::{query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
@@ -31,12 +32,14 @@ use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
 use lightning::chain::keysinterface::{KeysInterface, Sign};
 use lightning::chain::transaction::OutPoint;
 use lightning::ln::channelmanager::ChannelManager;
+use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
 use lightning::util::logger::Logger;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use secp256k1::PublicKey;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::fs;
 use std::io::{BufReader, BufWriter, Cursor, Error};
 use std::net::SocketAddr;
@@ -84,6 +87,8 @@ where
 
 fn channels_history_table(ticker: &str) -> String { ticker.to_owned() + "_channels_history" }
 
+fn payments_history_table(ticker: &str) -> String { ticker.to_owned() + "_payments_history" }
+
 fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
@@ -110,6 +115,26 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
     Ok(sql)
 }
 
+fn create_payments_history_table_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = payments_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "CREATE TABLE IF NOT EXISTS ".to_owned()
+        + &table_name
+        + " (
+        id INTEGER NOT NULL PRIMARY KEY,
+        payment_hash VARCHAR(255) NOT NULL UNIQUE,
+        preimage VARCHAR(255),
+        secret VARCHAR(255),
+        amount_msat INTEGER,
+        fee_paid_msat INTEGER,
+        is_outbound INTEGER NOT NULL,
+        status VARCHAR(255) NOT NULL
+    );";
+
+    Ok(sql)
+}
+
 fn insert_channel_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
@@ -121,11 +146,33 @@ fn insert_channel_sql(for_coin: &str) -> Result<String, SqlError> {
     Ok(sql)
 }
 
+fn insert_payment_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = payments_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "INSERT INTO ".to_owned()
+        + &table_name
+        + " (payment_hash, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
+
+    Ok(sql)
+}
+
 fn select_channel_from_table_by_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
     let sql = "SELECT rpc_id, channel_id, counterparty_node_id, funding_tx, funding_value, funding_generated_in_block, closing_tx, closure_reason, claiming_tx, claimed_balance, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
+
+    Ok(sql)
+}
+
+fn select_payment_from_table_by_hash_sql(for_coin: &str) -> Result<String, SqlError> {
+    let table_name = payments_history_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    let sql = "SELECT preimage, secret, amount_msat, fee_paid_msat, status FROM ".to_owned()
+        + &table_name
+        + " WHERE payment_hash=?1;";
 
     Ok(sql)
 }
@@ -147,6 +194,31 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
         is_closed: row.get(12)?,
     };
     Ok(channel_details)
+}
+
+fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
+    let payment_info = PaymentInfo {
+        preimage: row.get::<_, String>(0).ok().map(|p| {
+            PaymentPreimage(
+                hex::decode(p)
+                    .expect("Preimage decoding should not fail!")
+                    .try_into()
+                    .expect("String should be 64 characters!"),
+            )
+        }),
+        secret: row.get::<_, String>(1).ok().map(|s| {
+            PaymentSecret(
+                hex::decode(s)
+                    .expect("Secret decoding should not fail!")
+                    .try_into()
+                    .expect("String should be 64 characters!"),
+            )
+        }),
+        amt_msat: row.get::<_, u32>(2).ok().map(|v| v as u64),
+        fee_paid_msat: row.get::<_, u32>(3).ok().map(|v| v as u64),
+        status: HTLCStatus::from_str(&row.get::<_, String>(4)?)?,
+    };
+    Ok(payment_info)
 }
 
 fn get_last_channel_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
@@ -564,9 +636,11 @@ impl SqlStorage for LightningPersister {
     async fn init_sql(&self) -> Result<(), Self::Error> {
         let sqlite_connection = self.sqlite_connection.clone();
         let sql_channels_history = create_channels_history_table_sql(self.storage_ticker.as_str())?;
+        let sql_payments_history = create_payments_history_table_sql(self.storage_ticker.as_str())?;
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
             conn.execute(&sql_channels_history, NO_PARAMS).map(|_| ())?;
+            conn.execute(&sql_payments_history, NO_PARAMS).map(|_| ())?;
             Ok(())
         })
         .await
@@ -575,13 +649,17 @@ impl SqlStorage for LightningPersister {
     async fn is_sql_initialized(&self) -> Result<bool, Self::Error> {
         let channels_history_table = channels_history_table(self.storage_ticker.as_str());
         validate_table_name(&channels_history_table)?;
+        let payments_history_table = payments_history_table(self.storage_ticker.as_str());
+        validate_table_name(&payments_history_table)?;
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
             let channels_history_initialized =
                 query_single_row(&conn, CHECK_TABLE_EXISTS_SQL, [channels_history_table], string_from_row)?;
-            Ok(channels_history_initialized.is_some())
+            let payments_history_initialized =
+                query_single_row(&conn, CHECK_TABLE_EXISTS_SQL, [payments_history_table], string_from_row)?;
+            Ok(channels_history_initialized.is_some() && payments_history_initialized.is_some())
         })
         .await
     }
@@ -615,6 +693,41 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
+    async fn add_payment_to_sql(
+        &self,
+        hash: PaymentHash,
+        info: PaymentInfo,
+        is_outbound: bool,
+    ) -> Result<(), Self::Error> {
+        let for_coin = self.storage_ticker.clone();
+        let payment_hash = hex::encode(hash.0);
+        let preimage = info.preimage.map(|p| hex::encode(p.0));
+        let secret = info.secret.map(|s| hex::encode(s.0));
+        let amount_msat = info.amt_msat.map(|a| a as u32);
+        let fee_paid_msat = info.fee_paid_msat.map(|f| f as u32);
+        let is_outbound = is_outbound as i32;
+        let status = info.status.to_string();
+
+        let sqlite_connection = self.sqlite_connection.clone();
+        async_blocking(move || {
+            let params = [
+                &payment_hash as &dyn ToSql,
+                &preimage as &dyn ToSql,
+                &secret as &dyn ToSql,
+                &amount_msat as &dyn ToSql,
+                &fee_paid_msat as &dyn ToSql,
+                &is_outbound as &dyn ToSql,
+                &status as &dyn ToSql,
+            ];
+            let mut conn = sqlite_connection.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+            sql_transaction.execute(&insert_payment_sql(&for_coin)?, &params)?;
+            sql_transaction.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn get_channel_from_sql(&self, rpc_id: u64) -> Result<Option<SqlChannelDetails>, Self::Error> {
         let params = [rpc_id.to_string()];
         let sql = select_channel_from_table_by_rpc_id_sql(self.storage_ticker.as_str())?;
@@ -623,6 +736,18 @@ impl SqlStorage for LightningPersister {
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
             query_single_row(&conn, &sql, params, channel_details_from_row)
+        })
+        .await
+    }
+
+    async fn get_payment_from_sql(&self, hash: PaymentHash) -> Result<Option<PaymentInfo>, Self::Error> {
+        let params = [hex::encode(hash.0)];
+        let sql = select_payment_from_table_by_hash_sql(self.storage_ticker.as_str())?;
+        let sqlite_connection = self.sqlite_connection.clone();
+
+        async_blocking(move || {
+            let conn = sqlite_connection.lock().unwrap();
+            query_single_row(&conn, &sql, params, payment_info_from_row)
         })
         .await
     }
@@ -1078,5 +1203,47 @@ mod tests {
 
         let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
         assert_eq!(expected_channel_details, actual_channel_details);
+    }
+
+    #[test]
+    fn test_add_get_payment_sql() {
+        let persister = LightningPersister::new(
+            "add_get_payment".into(),
+            PathBuf::from("test_filesystem_persister"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
+
+        block_on(persister.init_sql()).unwrap();
+
+        let payment = block_on(persister.get_payment_from_sql(PaymentHash([0; 32]))).unwrap();
+        assert!(payment.is_none());
+
+        let mut expected_payment_info = PaymentInfo {
+            preimage: Some(PaymentPreimage([2; 32])),
+            secret: Some(PaymentSecret([3; 32])),
+            amt_msat: Some(2000),
+            fee_paid_msat: Some(100),
+            status: HTLCStatus::Failed,
+        };
+        block_on(persister.add_payment_to_sql(PaymentHash([0; 32]), expected_payment_info.clone(), true)).unwrap();
+
+        let actual_payment_info = block_on(persister.get_payment_from_sql(PaymentHash([0; 32])))
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected_payment_info, actual_payment_info);
+
+        // must fail because we are adding payment with the same hash
+        block_on(persister.add_payment_to_sql(PaymentHash([0; 32]), expected_payment_info.clone(), true)).unwrap_err();
+
+        expected_payment_info.secret = None;
+        expected_payment_info.amt_msat = None;
+        expected_payment_info.status = HTLCStatus::Succeeded;
+        block_on(persister.add_payment_to_sql(PaymentHash([1; 32]), expected_payment_info.clone(), true)).unwrap();
+
+        let actual_payment_info = block_on(persister.get_payment_from_sql(PaymentHash([1; 32])))
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected_payment_info, actual_payment_info);
     }
 }

@@ -3009,6 +3009,7 @@ dependencies = [
  "bitcoin",
  "common",
  "db_common",
+ "derive_more",
  "hex 0.4.3",
  "libc",
  "lightning",

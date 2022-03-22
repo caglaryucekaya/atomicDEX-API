@@ -34,7 +34,7 @@ use lightning::chain::keysinterface::KeysInterface;
 use lightning::chain::keysinterface::KeysManager;
 use lightning::chain::Access;
 use lightning::ln::channelmanager::{ChannelDetails, MIN_FINAL_CLTV_EXPIRY};
-use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
 use lightning::routing::scoring::Scorer;
 use lightning::util::config::UserConfig;
@@ -42,7 +42,8 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
-use lightning_persister::storage::{FileSystemStorage, NodesAddressesMapShared, SqlChannelDetails, SqlStorage};
+use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo,
+                                   SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -106,23 +107,6 @@ impl fmt::Debug for LightningCoin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "LightningCoin {{ conf: {:?} }}", self.conf) }
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HTLCStatus {
-    Pending,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Clone)]
-pub struct PaymentInfo {
-    pub preimage: Option<PaymentPreimage>,
-    pub secret: Option<PaymentSecret>,
-    pub status: HTLCStatus,
-    pub amt_msat: Option<u64>,
-    pub fee_paid_msat: Option<u64>,
-}
-
 impl LightningCoin {
     fn platform_coin(&self) -> &UtxoStandardCoin { &self.platform.coin }
 
@@ -153,9 +137,9 @@ impl LightningCoin {
         Ok((payment_hash, PaymentInfo {
             preimage: None,
             secret: payment_secret,
-            status: HTLCStatus::Pending,
             amt_msat: invoice.amount_milli_satoshis(),
             fee_paid_msat: None,
+            status: HTLCStatus::Pending,
         }))
     }
 
@@ -180,9 +164,9 @@ impl LightningCoin {
         Ok((payment_hash, PaymentInfo {
             preimage: Some(payment_preimage),
             secret: None,
-            status: HTLCStatus::Pending,
             amt_msat: Some(amount_msat),
             fee_paid_msat: None,
+            status: HTLCStatus::Pending,
         }))
     }
 }
@@ -1041,17 +1025,17 @@ pub struct ListPaymentsReq {
 
 #[derive(Serialize)]
 pub struct PaymentInfoForRPC {
-    status: HTLCStatus,
     amount_in_msat: Option<u64>,
     fee_paid_msat: Option<u64>,
+    status: HTLCStatus,
 }
 
 impl From<PaymentInfo> for PaymentInfoForRPC {
     fn from(info: PaymentInfo) -> Self {
         PaymentInfoForRPC {
-            status: info.status,
             amount_in_msat: info.amt_msat,
             fee_paid_msat: info.fee_paid_msat,
+            status: info.status,
         }
     }
 }

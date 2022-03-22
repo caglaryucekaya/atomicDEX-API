@@ -226,9 +226,9 @@ impl LightningEventHandler {
                 e.insert(PaymentInfo {
                     preimage: Some(payment_preimage),
                     secret: payment_secret,
-                    status,
                     amt_msat: Some(amt),
                     fee_paid_msat: None,
+                    status,
                 });
             },
         }

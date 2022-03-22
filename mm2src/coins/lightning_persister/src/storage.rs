@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 use bitcoin::Network;
+use db_common::sqlite::rusqlite::types::FromSqlError;
+use derive_more::Display;
+use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::Scorer;
 use parking_lot::Mutex as PaMutex;
@@ -7,6 +10,7 @@ use secp256k1::PublicKey;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 pub type NodesAddressesMap = HashMap<PublicKey, SocketAddr>;
@@ -84,6 +88,36 @@ impl SqlChannelDetails {
     }
 }
 
+#[derive(Clone, Debug, Display, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HTLCStatus {
+    Pending,
+    Succeeded,
+    Failed,
+}
+
+impl FromStr for HTLCStatus {
+    type Err = FromSqlError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(HTLCStatus::Pending),
+            "succeeded" => Ok(HTLCStatus::Succeeded),
+            "failed" => Ok(HTLCStatus::Failed),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaymentInfo {
+    pub preimage: Option<PaymentPreimage>,
+    pub secret: Option<PaymentSecret>,
+    pub amt_msat: Option<u64>,
+    pub fee_paid_msat: Option<u64>,
+    pub status: HTLCStatus,
+}
+
 #[async_trait]
 pub trait SqlStorage {
     type Error;
@@ -95,7 +129,16 @@ pub trait SqlStorage {
 
     async fn add_channel_to_sql(&self, details: SqlChannelDetails) -> Result<(), Self::Error>;
 
+    async fn add_payment_to_sql(
+        &self,
+        hash: PaymentHash,
+        info: PaymentInfo,
+        is_outbound: bool,
+    ) -> Result<(), Self::Error>;
+
     async fn get_channel_from_sql(&self, rpc_id: u64) -> Result<Option<SqlChannelDetails>, Self::Error>;
+
+    async fn get_payment_from_sql(&self, hash: PaymentHash) -> Result<Option<PaymentInfo>, Self::Error>;
 
     async fn get_last_channel_rpc_id(&self) -> Result<u32, Self::Error>;
 
