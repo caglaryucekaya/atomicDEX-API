@@ -4,7 +4,7 @@ use db_common::sqlite::rusqlite::types::FromSqlError;
 use derive_more::Display;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetworkGraph;
-use lightning::routing::scoring::Scorer;
+use lightning::routing::scoring::ProbabilisticScorer;
 use parking_lot::Mutex as PaMutex;
 use secp256k1::PublicKey;
 use serde::Serialize;
@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 pub type NodesAddressesMap = HashMap<PublicKey, SocketAddr>;
 pub type NodesAddressesMapShared = Arc<PaMutex<NodesAddressesMap>>;
-
+pub type Scorer = ProbabilisticScorer<Arc<NetworkGraph>>;
 #[async_trait]
 pub trait FileSystemStorage {
     type Error;
@@ -33,7 +33,7 @@ pub trait FileSystemStorage {
 
     async fn save_network_graph(&self, network_graph: Arc<NetworkGraph>) -> Result<(), Self::Error>;
 
-    async fn get_scorer(&self) -> Result<Scorer, Self::Error>;
+    async fn get_scorer(&self, network_graph: Arc<NetworkGraph>) -> Result<Scorer, Self::Error>;
 
     async fn save_scorer(&self, scorer: Arc<Mutex<Scorer>>) -> Result<(), Self::Error>;
 }

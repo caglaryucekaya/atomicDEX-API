@@ -30,20 +30,18 @@ use futures::{FutureExt, TryFutureExt};
 use futures01::Future;
 use keys::{AddressHashEnum, KeyPair};
 use lightning::chain::channelmonitor::Balance;
-use lightning::chain::keysinterface::KeysInterface;
-use lightning::chain::keysinterface::KeysManager;
+use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
 use lightning::chain::Access;
 use lightning::ln::channelmanager::{ChannelDetails, MIN_FINAL_CLTV_EXPIRY};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
-use lightning::routing::scoring::Scorer;
 use lightning::util::config::UserConfig;
 use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::Invoice;
 use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo, PaymentType,
-                                   SqlChannelDetails, SqlStorage};
+                                   Scorer, SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -374,7 +372,13 @@ impl MarketCoinOps for LightningCoin {
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { Box::new(futures01::future::ok(0)) }
 
-    fn display_priv_key(&self) -> Result<String, String> { Ok(self.keys_manager.get_node_secret().to_string()) }
+    fn display_priv_key(&self) -> Result<String, String> {
+        Ok(self
+            .keys_manager
+            .get_node_secret(Recipient::Node)
+            .map_err(|_| "Unsupported recipient".to_string())?
+            .to_string())
+    }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used only for swaps
     fn min_tx_amount(&self) -> BigDecimal { unimplemented!() }
@@ -540,7 +544,9 @@ pub async fn start_lightning(
         params.listening_port,
         channel_manager.clone(),
         network_gossip.clone(),
-        keys_manager.get_node_secret(),
+        keys_manager
+            .get_node_secret(Recipient::Node)
+            .map_to_mm(|_| EnableLightningError::UnsupportedMode("'start_lightning'".into(), "local node".into()))?,
         logger.clone(),
     )
     .await?;
@@ -555,7 +561,7 @@ pub async fn start_lightning(
     ));
 
     // Initialize routing Scorer
-    let scorer = Arc::new(Mutex::new(persister.get_scorer().await?));
+    let scorer = Arc::new(Mutex::new(persister.get_scorer(network_graph.clone()).await?));
     spawn(ln_utils::persist_scorer_loop(persister.clone(), scorer.clone()));
 
     // Create InvoicePayer

@@ -57,7 +57,7 @@ const FRESHNESS_TIMER: u64 = 60;
 const FRESHNESS_TIMER: u64 = 1;
 
 #[cfg(all(not(test), not(debug_assertions)))]
-const PING_TIMER: u64 = 5;
+const PING_TIMER: u64 = 10;
 /// Signature operations take a lot longer without compiler optimisations.
 /// Increasing the ping timer allows for this but slower devices will be disconnected if the
 /// timeout is reached.
@@ -229,10 +229,16 @@ impl BackgroundProcessor {
             let mut have_pruned = false;
 
             loop {
-                peer_manager.process_events();
+                peer_manager.process_events(); // Note that this may block on ChannelManager's locking
                 channel_manager.process_pending_events(&event_handler);
                 chain_monitor.process_pending_events(&event_handler);
+
+                // We wait up to 100ms, but track how long it takes to detect being put to sleep,
+                // see `await_start`'s use below.
+                let await_start = Instant::now();
                 let updates_available = channel_manager.await_persistable_update_timeout(Duration::from_millis(100));
+                let await_time = await_start.elapsed();
+
                 if updates_available {
                     log_trace!(logger, "Persisting ChannelManager...");
                     persister.persist_manager(&*channel_manager)?;
@@ -241,25 +247,27 @@ impl BackgroundProcessor {
                 // Exit the loop if the background processor was requested to stop.
                 if stop_thread.load(Ordering::Acquire) {
                     log_trace!(logger, "Terminating background processor.");
-                    return Ok(());
+                    break;
                 }
                 if last_freshness_call.elapsed().as_secs() > FRESHNESS_TIMER {
                     log_trace!(logger, "Calling ChannelManager's timer_tick_occurred");
                     channel_manager.timer_tick_occurred();
                     last_freshness_call = Instant::now();
                 }
-                if last_ping_call.elapsed().as_secs() > PING_TIMER * 2 {
+                if await_time > Duration::from_secs(1) {
                     // On various platforms, we may be starved of CPU cycles for several reasons.
                     // E.g. on iOS, if we've been in the background, we will be entirely paused.
                     // Similarly, if we're on a desktop platform and the device has been asleep, we
                     // may not get any cycles.
-                    // In any case, if we've been entirely paused for more than double our ping
-                    // timer, we should have disconnected all sockets by now (and they're probably
-                    // dead anyway), so disconnect them by calling `timer_tick_occurred()` twice.
-                    log_trace!(
-                        logger,
-                        "Awoke after more than double our ping timer, disconnecting peers."
-                    );
+                    // We detect this by checking if our max-100ms-sleep, above, ran longer than a
+                    // full second, at which point we assume sockets may have been killed (they
+                    // appear to be at least on some platforms, even if it has only been a second).
+                    // Note that we have to take care to not get here just because user event
+                    // processing was slow at the top of the loop. For example, the sample client
+                    // may call Bitcoin Core RPCs during event handling, which very often takes
+                    // more than a handful of seconds to complete, and shouldn't disconnect all our
+                    // peers.
+                    log_trace!(logger, "100ms sleep took more than a second, disconnecting peers.");
                     peer_manager.disconnect_all_peers();
                     last_ping_call = Instant::now();
                 } else if last_ping_call.elapsed().as_secs() > PING_TIMER {
@@ -281,6 +289,10 @@ impl BackgroundProcessor {
                     }
                 }
             }
+            // After we exit, ensure we persist the ChannelManager one final time - this avoids
+            // some races where users quit while channel updates were in-flight, with
+            // ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
+            persister.persist_manager(&*channel_manager)
         });
         Self {
             stop_thread: stop_thread_clone,
@@ -342,7 +354,7 @@ mod tests {
     use bitcoin::network::constants::Network;
     use db_common::sqlite::rusqlite::Connection;
     use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
-    use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager};
+    use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
     use lightning::chain::transaction::OutPoint;
     use lightning::chain::{chainmonitor, BestBlock, Confirm};
     use lightning::get_event_msg;
@@ -484,7 +496,7 @@ mod tests {
             };
             let peer_manager = Arc::new(PeerManager::new(
                 msg_handler,
-                keys_manager.get_node_secret(),
+                keys_manager.get_node_secret(Recipient::Node).unwrap(),
                 &seed,
                 logger.clone(),
                 IgnoringMessageHandler {},
@@ -906,7 +918,7 @@ mod tests {
             Arc<test_utils::TestLogger>,
         >| node_0_persister.persist_manager(node);
         let router = DefaultRouter::new(Arc::clone(&nodes[0].network_graph), Arc::clone(&nodes[0].logger));
-        let scorer = Arc::new(Mutex::new(test_utils::TestScorer::default()));
+        let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
         let invoice_payer = Arc::new(InvoicePayer::new(
             Arc::clone(&nodes[0].node),
             router,

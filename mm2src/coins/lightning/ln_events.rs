@@ -79,6 +79,8 @@ impl EventHandler for LightningEventHandler {
                 rejected_by_dest,
                 all_paths_failed,
             ),
+            // Todo: Handle inbound channels
+            Event::OpenChannelRequest { .. } => {},
         }
     }
 }

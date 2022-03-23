@@ -1,6 +1,6 @@
 [package]
 name = "lightning-persister"
-version = "0.0.104"
+version = "0.0.105"
 edition = "2018"
 authors = ["Valentine Wallace", "Matt Corallo"]
 license = "MIT OR Apache-2.0"
@@ -16,7 +16,7 @@ common = { path = "../../common" }
 db_common = { path = "../../db_common" }
 derive_more = "0.99"
 hex = "0.4.2"
-lightning = "0.0.104"
+lightning = "0.0.105"
 libc = "0.2"
 parking_lot = { version = "0.12.0", features = ["nightly"] }
 secp256k1 = { version = "0.20" }
@@ -27,4 +27,4 @@ serde_json = "1.0"
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { version = "0.0.104", features = ["_test_utils"] }
+lightning = { version = "0.0.105", features = ["_test_utils"] }

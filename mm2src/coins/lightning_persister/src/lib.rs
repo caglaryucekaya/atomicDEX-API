@@ -14,7 +14,7 @@ extern crate secp256k1;
 extern crate serde_json;
 
 use crate::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMap, NodesAddressesMapShared, PaymentInfo,
-                     PaymentType, SqlChannelDetails, SqlStorage};
+                     PaymentType, Scorer, SqlChannelDetails, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
 use bitcoin::blockdata::constants::genesis_block;
@@ -23,8 +23,9 @@ use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::Network;
 use common::async_blocking;
 use common::fs::check_dir_operations;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, ToSql, NO_PARAMS};
-use db_common::sqlite::{query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
+use db_common::sqlite::rusqlite::{Error as SqlError, Row, ToSql, NO_PARAMS};
+use db_common::sqlite::{query_single_row, string_from_row, validate_table_name, SqliteConnShared,
+                        CHECK_TABLE_EXISTS_SQL};
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
 use lightning::chain::chainmonitor;
@@ -34,7 +35,7 @@ use lightning::chain::transaction::OutPoint;
 use lightning::ln::channelmanager::ChannelManager;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetworkGraph;
-use lightning::routing::scoring::Scorer;
+use lightning::routing::scoring::ProbabilisticScoringParameters;
 use lightning::util::logger::Logger;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use secp256k1::PublicKey;
@@ -66,7 +67,7 @@ pub struct LightningPersister {
     storage_ticker: String,
     main_path: PathBuf,
     backup_path: Option<PathBuf>,
-    sqlite_connection: Arc<Mutex<Connection>>,
+    sqlite_connection: SqliteConnShared,
 }
 
 impl<Signer: Sign> DiskWriteable for ChannelMonitor<Signer> {
@@ -317,7 +318,7 @@ impl LightningPersister {
         storage_ticker: String,
         main_path: PathBuf,
         backup_path: Option<PathBuf>,
-        sqlite_connection: Arc<Mutex<Connection>>,
+        sqlite_connection: SqliteConnShared,
     ) -> Self {
         Self {
             storage_ticker,
@@ -422,6 +423,12 @@ impl LightningPersister {
                     std::io::ErrorKind::InvalidData,
                     "Invalid ChannelMonitor file name",
                 ));
+            }
+            if filename.unwrap().ends_with(".tmp") {
+                // If we were in the middle of committing an new update and crashed, it should be
+                // safe to ignore the update - we should never have returned to the caller and
+                // irrevocably committed to the new state in any way.
+                continue;
             }
 
             let txid = Txid::from_hex(filename.unwrap().split_at(64).0);
@@ -634,15 +641,18 @@ impl FileSystemStorage for LightningPersister {
         .await
     }
 
-    async fn get_scorer(&self) -> Result<Scorer, Self::Error> {
+    async fn get_scorer(&self, network_graph: Arc<NetworkGraph>) -> Result<Scorer, Self::Error> {
         let path = self.scorer_path();
         if !path.exists() {
-            return Ok(Scorer::default());
+            return Ok(Scorer::new(ProbabilisticScoringParameters::default(), network_graph));
         }
         async_blocking(move || {
             let file = fs::File::open(path)?;
-            Scorer::read(&mut BufReader::new(file))
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+            Scorer::read(
+                &mut BufReader::new(file),
+                (ProbabilisticScoringParameters::default(), network_graph),
+            )
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
         })
         .await
     }
