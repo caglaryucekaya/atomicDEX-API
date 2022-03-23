@@ -29,12 +29,11 @@ mod bchd_pb;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;
+pub mod utxo_block_header_storage;
 pub mod utxo_builder;
 pub mod utxo_common;
 pub mod utxo_standard;
 pub mod utxo_withdraw;
-
-#[cfg(not(target_arch = "wasm32"))] pub mod tx_cache;
 
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
@@ -50,8 +49,8 @@ use common::mm_error::prelude::*;
 use common::mm_metrics::MetricsArc;
 use common::now_ms;
 use crypto::trezor::utxo::TrezorUtxoCoin;
-use crypto::{Bip32DerPathOps, Bip44Chain, Bip44PathToAccount, Bip44PathToCoin, ChildNumber, DerivationPath,
-             Secp256k1ExtendedPublicKey};
+use crypto::{Bip32DerPathOps, Bip32Error, Bip44Chain, Bip44DerPathError, Bip44PathToAccount, Bip44PathToCoin,
+             ChildNumber, DerivationPath, Secp256k1ExtendedPublicKey};
 use derive_more::Display;
 #[cfg(not(target_arch = "wasm32"))] use dirs::home_dir;
 use futures::channel::mpsc;
@@ -69,6 +68,7 @@ use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as 
 use script::{Builder, Script, SignatureVersion, TransactionInputSigner};
 use serde_json::{self as json, Value as Json};
 use serialization::{serialize, serialize_with_flags, SERIALIZE_TRANSACTION_WITNESS};
+use spv_validation::types::SPVError;
 use std::array::TryFromSliceError;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -87,13 +87,21 @@ use utxo_signer::{TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult
 
 use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
                         NativeClient, UnspentInfo, UtxoRpcClientEnum, UtxoRpcError, UtxoRpcFut, UtxoRpcResult};
-use super::{BalanceError, BalanceFut, BalanceResult, CoinsContext, DerivationMethod, DerivationMethodNotSupported,
-            FeeApproxStage, FoundSwapTxSpend, HistorySyncState, KmdRewardsDetails, MarketCoinOps, MmCoin,
-            NumConversError, NumConversResult, PrivKeyNotAllowed, PrivKeyPolicy, RpcTransportEventHandler,
-            RpcTransportEventHandlerShared, TradeFee, TradePreimageError, TradePreimageFut, TradePreimageResult,
-            Transaction, TransactionDetails, TransactionEnum, TransactionFut, WithdrawError, WithdrawRequest};
-use crate::coin_balance::HDAddressBalanceChecker;
+use super::{BalanceError, BalanceFut, BalanceResult, CoinsContext, DerivationMethod, FeeApproxStage, FoundSwapTxSpend,
+            HistorySyncState, KmdRewardsDetails, MarketCoinOps, MmCoin, NumConversError, NumConversResult,
+            PrivKeyNotAllowed, PrivKeyPolicy, RpcTransportEventHandler, RpcTransportEventHandlerShared, TradeFee,
+            TradePreimageError, TradePreimageFut, TradePreimageResult, Transaction, TransactionDetails,
+            TransactionEnum, TransactionFut, UnexpectedDerivationMethod, WithdrawError, WithdrawRequest};
+use crate::coin_balance::{EnableCoinScanPolicy, HDAddressBalanceScanner};
 use crate::hd_wallet::{HDAccountOps, HDAccountsMutex, HDAddress, HDWalletCoinOps, HDWalletOps, InvalidBip44ChainError};
+use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageResult};
+use crate::utxo::utxo_block_header_storage::BlockHeaderStorageError;
+use utxo_block_header_storage::BlockHeaderStorage;
+#[cfg(not(target_arch = "wasm32"))] pub mod tx_cache;
+#[cfg(target_arch = "wasm32")]
+pub mod utxo_indexedb_block_header_storage;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod utxo_sql_block_header_storage;
 
 #[cfg(test)] pub mod utxo_tests;
 #[cfg(target_arch = "wasm32")] pub mod utxo_wasm_tests;
@@ -203,6 +211,14 @@ impl From<UtxoRpcError> for TxProviderError {
             UtxoRpcError::Internal(internal) => TxProviderError::Internal(internal),
         }
     }
+}
+
+impl From<Bip44DerPathError> for HDWalletStorageError {
+    fn from(e: Bip44DerPathError) -> Self { HDWalletStorageError::ErrorDeserializing(e.to_string()) }
+}
+
+impl From<Bip32Error> for HDWalletStorageError {
+    fn from(e: Bip32Error) -> Self { HDWalletStorageError::ErrorDeserializing(e.to_string()) }
 }
 
 #[async_trait]
@@ -501,6 +517,7 @@ pub struct UtxoCoinFields {
     pub history_sync_state: Mutex<HistorySyncState>,
     /// Path to the TX cache directory
     pub tx_cache_directory: Option<PathBuf>,
+    pub block_headers_storage: Option<BlockHeaderStorage>,
     /// The cache of recently send transactions used to track the spent UTXOs and replace them with new outputs
     /// The daemon needs some time to update the listunspent list for address which makes it return already spent UTXOs
     /// This cache helps to prevent UTXO reuse in such cases
@@ -534,6 +551,56 @@ pub enum UnsupportedAddr {
 
 impl From<UnsupportedAddr> for WithdrawError {
     fn from(e: UnsupportedAddr) -> Self { WithdrawError::InvalidAddress(e.to_string()) }
+}
+
+#[derive(Debug)]
+pub enum GetTxHeightError {
+    HeightNotFound,
+}
+
+impl From<GetTxHeightError> for SPVError {
+    fn from(e: GetTxHeightError) -> Self {
+        match e {
+            GetTxHeightError::HeightNotFound => SPVError::InvalidHeight,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GetBlockHeaderError {
+    StorageError(BlockHeaderStorageError),
+    RpcError(JsonRpcError),
+    SerializationError(serialization::Error),
+    InvalidResponse(String),
+    SPVError(SPVError),
+    NativeNotSupported(String),
+    Internal(String),
+}
+
+impl From<JsonRpcError> for GetBlockHeaderError {
+    fn from(err: JsonRpcError) -> Self { GetBlockHeaderError::RpcError(err) }
+}
+
+impl From<UtxoRpcError> for GetBlockHeaderError {
+    fn from(e: UtxoRpcError) -> Self {
+        match e {
+            UtxoRpcError::Transport(e) | UtxoRpcError::ResponseParseError(e) => GetBlockHeaderError::RpcError(e),
+            UtxoRpcError::InvalidResponse(e) => GetBlockHeaderError::InvalidResponse(e),
+            UtxoRpcError::Internal(e) => GetBlockHeaderError::Internal(e),
+        }
+    }
+}
+
+impl From<SPVError> for GetBlockHeaderError {
+    fn from(e: SPVError) -> Self { GetBlockHeaderError::SPVError(e) }
+}
+
+impl From<serialization::Error> for GetBlockHeaderError {
+    fn from(err: serialization::Error) -> Self { GetBlockHeaderError::SerializationError(err) }
+}
+
+impl From<BlockHeaderStorageError> for GetBlockHeaderError {
+    fn from(err: BlockHeaderStorageError) -> Self { GetBlockHeaderError::StorageError(err) }
 }
 
 impl UtxoCoinFields {
@@ -612,25 +679,23 @@ pub trait UtxoTxGenerationOps {
     ) -> UtxoRpcResult<(TransactionInputSigner, AdditionalTxData)>;
 }
 
-/// The UTXO address balance checker.
+/// The UTXO address balance scanner.
 /// If the coin is initialized with a native RPC client, it's better to request the list of used addresses
-/// right on `UtxoAddressBalanceChecker` initialization.
+/// right on `UtxoAddressBalanceScanner` initialization.
 /// See [`NativeClientImpl::list_transactions`].
-pub enum UtxoAddressBalanceChecker {
+pub enum UtxoAddressScanner {
     Native { non_empty_addresses: HashSet<String> },
     Electrum(ElectrumClient),
 }
 
 #[async_trait]
-impl HDAddressBalanceChecker for UtxoAddressBalanceChecker {
+impl HDAddressBalanceScanner for UtxoAddressScanner {
     type Address = Address;
 
     async fn is_address_used(&self, address: &Self::Address) -> BalanceResult<bool> {
         let is_used = match self {
-            UtxoAddressBalanceChecker::Native { non_empty_addresses } => {
-                non_empty_addresses.contains(&address.to_string())
-            },
-            UtxoAddressBalanceChecker::Electrum(electrum_client) => {
+            UtxoAddressScanner::Native { non_empty_addresses } => non_empty_addresses.contains(&address.to_string()),
+            UtxoAddressScanner::Electrum(electrum_client) => {
                 let script = output_script(address, ScriptType::P2PKH);
                 let script_hash = electrum_script_hash(&script);
 
@@ -646,15 +711,15 @@ impl HDAddressBalanceChecker for UtxoAddressBalanceChecker {
     }
 }
 
-impl UtxoAddressBalanceChecker {
-    pub async fn init(rpc_client: UtxoRpcClientEnum) -> UtxoRpcResult<UtxoAddressBalanceChecker> {
+impl UtxoAddressScanner {
+    pub async fn init(rpc_client: UtxoRpcClientEnum) -> UtxoRpcResult<UtxoAddressScanner> {
         match rpc_client {
-            UtxoRpcClientEnum::Native(native) => UtxoAddressBalanceChecker::init_with_native_client(&native).await,
-            UtxoRpcClientEnum::Electrum(electrum) => Ok(UtxoAddressBalanceChecker::Electrum(electrum)),
+            UtxoRpcClientEnum::Native(native) => UtxoAddressScanner::init_with_native_client(&native).await,
+            UtxoRpcClientEnum::Electrum(electrum) => Ok(UtxoAddressScanner::Electrum(electrum)),
         }
     }
 
-    pub async fn init_with_native_client(native: &NativeClient) -> UtxoRpcResult<UtxoAddressBalanceChecker> {
+    pub async fn init_with_native_client(native: &NativeClient) -> UtxoRpcResult<UtxoAddressScanner> {
         const STEP: u64 = 100;
 
         let non_empty_addresses = native
@@ -664,7 +729,7 @@ impl UtxoAddressBalanceChecker {
             .into_iter()
             .map(|tx_item| tx_item.address)
             .collect();
-        Ok(UtxoAddressBalanceChecker::Native { non_empty_addresses })
+        Ok(UtxoAddressScanner::Native { non_empty_addresses })
     }
 }
 
@@ -684,7 +749,7 @@ pub trait UtxoCommonOps: UtxoTxGenerationOps + UtxoTxBroadcastOps {
     /// The method is expected to fail if [`UtxoCoinFields::priv_key_policy`] is [`PrivKeyPolicy::HardwareWallet`].
     /// It's worth adding a method like `my_public_key_der_path`
     /// that takes a derivation path from which we derive the corresponding public key.
-    fn my_public_key(&self) -> Result<&Public, MmError<DerivationMethodNotSupported>>;
+    fn my_public_key(&self) -> Result<&Public, MmError<UnexpectedDerivationMethod>>;
 
     /// Try to parse address from string using specified on asset enable format,
     /// and if it failed inform user that he used a wrong format.
@@ -1025,6 +1090,14 @@ pub struct UtxoMergeParams {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct UtxoBlockHeaderVerificationParams {
+    pub difficulty_check: bool,
+    pub constant_difficulty: bool,
+    pub blocks_limit_to_check: NonZeroU64,
+    pub check_every: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UtxoActivationParams {
     pub mode: UtxoRpcMode,
     pub utxo_merge_params: Option<UtxoMergeParams>,
@@ -1034,6 +1107,8 @@ pub struct UtxoActivationParams {
     pub requires_notarization: Option<bool>,
     pub address_format: Option<UtxoAddressFormat>,
     pub gap_limit: Option<u32>,
+    #[serde(default)]
+    pub scan_policy: EnableCoinScanPolicy,
     /// The flag determines whether to use mature unspent outputs *only* to generate transactions.
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
     pub check_utxo_maturity: Option<bool>,
@@ -1044,6 +1119,7 @@ pub enum UtxoFromLegacyReqErr {
     UnexpectedMethod,
     InvalidElectrumServers(json::Error),
     InvalidMergeParams(json::Error),
+    InvalidBlockHeaderVerificationParams(json::Error),
     InvalidRequiredConfs(json::Error),
     InvalidRequiresNota(json::Error),
     InvalidAddressFormat(json::Error),
@@ -1073,6 +1149,7 @@ impl UtxoActivationParams {
             json::from_value(req["address_format"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidAddressFormat)?;
         let check_utxo_maturity = json::from_value(req["check_utxo_maturity"].clone())
             .map_to_mm(UtxoFromLegacyReqErr::InvalidCheckUtxoMaturity)?;
+        let scan_policy = EnableCoinScanPolicy::default();
 
         Ok(UtxoActivationParams {
             mode,
@@ -1082,6 +1159,7 @@ impl UtxoActivationParams {
             requires_notarization,
             address_format,
             gap_limit: None,
+            scan_policy,
             check_utxo_maturity,
         })
     }
@@ -1113,6 +1191,7 @@ impl Default for ElectrumBuilderArgs {
 
 #[derive(Debug)]
 pub struct UtxoHDWallet {
+    pub hd_wallet_storage: HDWalletCoinStorage,
     pub address_format: UtxoAddressFormat,
     /// Derivation path of the coin.
     /// This derivation path consists of `purpose` and `coin_type` only
@@ -1157,16 +1236,40 @@ impl HDAccountOps for UtxoHDAccount {
         }
     }
 
-    fn known_addresses_number_mut(&mut self, chain: Bip44Chain) -> MmResult<&mut u32, InvalidBip44ChainError> {
-        match chain {
-            Bip44Chain::External => Ok(&mut self.external_addresses_number),
-            Bip44Chain::Internal => Ok(&mut self.internal_addresses_number),
-        }
-    }
-
     fn account_derivation_path(&self) -> DerivationPath { self.account_derivation_path.to_derivation_path() }
 
     fn account_id(&self) -> u32 { self.account_id }
+}
+
+impl UtxoHDAccount {
+    pub fn try_from_storage_item(
+        wallet_der_path: &Bip44PathToCoin,
+        account_info: &HDAccountStorageItem,
+    ) -> HDWalletStorageResult<UtxoHDAccount> {
+        const ACCOUNT_CHILD_HARDENED: bool = true;
+
+        let account_child = ChildNumber::new(account_info.account_id, ACCOUNT_CHILD_HARDENED)?;
+        let account_derivation_path = wallet_der_path
+            .derive(account_child)
+            .map_to_mm(Bip44DerPathError::from)?;
+        let extended_pubkey = Secp256k1ExtendedPublicKey::from_str(&account_info.account_xpub)?;
+        Ok(UtxoHDAccount {
+            account_id: account_info.account_id,
+            extended_pubkey,
+            account_derivation_path,
+            external_addresses_number: account_info.external_addresses_number,
+            internal_addresses_number: account_info.internal_addresses_number,
+        })
+    }
+
+    pub fn to_storage_item(&self) -> HDAccountStorageItem {
+        HDAccountStorageItem {
+            account_id: self.account_id,
+            account_xpub: self.extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: self.external_addresses_number,
+            internal_addresses_number: self.internal_addresses_number,
+        }
+    }
 }
 
 /// Function calculating KMD interest
@@ -1445,6 +1548,7 @@ pub fn address_by_conf_and_pubkey_str(
         requires_notarization: None,
         address_format: None,
         gap_limit: None,
+        scan_policy: EnableCoinScanPolicy::default(),
         check_utxo_maturity: None,
     };
     let conf_builder = UtxoConfBuilder::new(conf, &params, coin);

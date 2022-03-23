@@ -2,15 +2,16 @@ use super::*;
 use crate::coin_balance::{AccountBalanceParams, CheckHDAccountBalanceParams, CheckHDAccountBalanceResponse,
                           HDAccountBalanceResponse, HDAddressBalance, HDWalletBalanceRpcOps};
 use crate::hd_wallet::HDAccountsMap;
+use crate::hd_wallet_storage::{HDWalletMockStorage, HDWalletStorageInternalOps};
 use crate::utxo::qtum::{qtum_coin_with_priv_key, QtumCoin, QtumDelegationOps, QtumDelegationRequest};
 use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl,
                                GetAddressInfoRes, ListSinceBlockRes, ListTransactionsItem, NativeClient,
                                NativeClientImpl, NetworkInfo, UtxoRpcClientOps, ValidateAddressRes, VerboseBlock};
-use crate::utxo::utxo_builder::{UtxoArcWithIguanaPrivKeyBuilder, UtxoCoinBuilderCommonOps};
+use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps};
 use crate::utxo::utxo_common::UtxoTxBuilder;
 use crate::utxo::utxo_standard::{utxo_standard_coin_with_priv_key, UtxoStandardCoin};
 #[cfg(not(target_arch = "wasm32"))] use crate::WithdrawFee;
-use crate::{CoinBalance, StakingInfosDetails, SwapOps, TradePreimageValue, TxFeeDetails};
+use crate::{CoinBalance, PrivKeyBuildPolicy, StakingInfosDetails, SwapOps, TradePreimageValue, TxFeeDetails};
 use bigdecimal::{BigDecimal, Signed};
 use chain::OutPoint;
 use common::executor::Timer;
@@ -43,8 +44,15 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
         "servers": servers,
     });
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
-    let builder =
-        UtxoArcWithIguanaPrivKeyBuilder::new(&ctx, TEST_COIN_NAME, &Json::Null, &params, &[], UtxoStandardCoin::from);
+    let priv_key_policy = PrivKeyBuildPolicy::IguanaPrivKey(&[]);
+    let builder = UtxoArcBuilder::new(
+        &ctx,
+        TEST_COIN_NAME,
+        &Json::Null,
+        &params,
+        priv_key_policy,
+        UtxoStandardCoin::from,
+    );
     let args = ElectrumBuilderArgs {
         spawn_ping: false,
         negotiate_version: true,
@@ -138,6 +146,7 @@ fn utxo_coin_fields_for_test(
         derivation_method,
         history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
         tx_cache_directory: None,
+        block_headers_storage: None,
         recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
         tx_hash_algo: TxHashAlgo::DSHA256,
         check_utxo_maturity: false,
@@ -910,6 +919,22 @@ fn test_utxo_lock() {
     for result in results {
         result.unwrap();
     }
+}
+
+#[test]
+fn test_spv_proof() {
+    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let coin = utxo_coin_for_test(
+        client.into(),
+        Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
+        false,
+    );
+
+    // https://rick.explorer.dexstats.info/tx/78ea7839f6d1b0dafda2ba7e34c1d8218676a58bd1b33f03a5f76391f61b72b0
+    let tx_str = "0400008085202f8902bf17bf7d1daace52e08f732a6b8771743ca4b1cb765a187e72fd091a0aabfd52000000006a47304402203eaaa3c4da101240f80f9c5e9de716a22b1ec6d66080de6a0cca32011cd77223022040d9082b6242d6acf9a1a8e658779e1c655d708379862f235e8ba7b8ca4e69c6012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffff023ca13c0e9e085dd13f481f193e8a3e8fd609020936e98b5587342d994f4d020000006b483045022100c0ba56adb8de923975052312467347d83238bd8d480ce66e8b709a7997373994022048507bcac921fdb2302fa5224ce86e41b7efc1a2e20ae63aa738dfa99b7be826012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0300e1f5050000000017a9141ee6d4c38a3c078eab87ad1a5e4b00f21259b10d870000000000000000166a1400000000000000000000000000000000000000001b94d736000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac2d08e35e000000000000000000000000000000";
+    let tx: UtxoTx = tx_str.into();
+    let res = block_on(utxo_common::validate_spv_proof(coin.clone(), tx));
+    res.unwrap()
 }
 
 #[test]
@@ -3446,6 +3471,7 @@ fn test_account_balance_rpc() {
         internal_addresses_number: 1,
     });
     fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
+        hd_wallet_storage: HDWalletCoinStorage::default(),
         address_format: UtxoAddressFormat::Standard,
         derivation_path: Bip44PathToCoin::from_str("m/44'/141'").unwrap(),
         accounts: HDAccountsMutex::new(hd_accounts),
@@ -3466,6 +3492,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1", "m/44'/141'/0'/0/2"),
+        page_balance: CoinBalance::new(BigDecimal::from(0)),
         limit: 3,
         skipped: 0,
         total: 7,
@@ -3487,6 +3514,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/3", "m/44'/141'/0'/0/4", "m/44'/141'/0'/0/5"),
+        page_balance: CoinBalance::new(BigDecimal::from(99)),
         limit: 3,
         skipped: 3,
         total: 7,
@@ -3508,6 +3536,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/6"),
+        page_balance: CoinBalance::new(BigDecimal::from(32)),
         limit: 3,
         skipped: 6,
         total: 7,
@@ -3529,6 +3558,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: Vec::new(),
+        page_balance: CoinBalance::default(),
         limit: 3,
         skipped: 7,
         total: 7,
@@ -3550,6 +3580,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/1/1", "m/44'/141'/0'/1/2"),
+        page_balance: CoinBalance::new(BigDecimal::from(54)),
         limit: 3,
         skipped: 1,
         total: 3,
@@ -3571,6 +3602,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: Vec::new(),
+        page_balance: CoinBalance::default(),
         limit: 3,
         skipped: 0,
         total: 0,
@@ -3592,6 +3624,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/1'/1/0"),
+        page_balance: CoinBalance::new(BigDecimal::from(0)),
         limit: 3,
         skipped: 0,
         total: 1,
@@ -3613,6 +3646,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: Vec::new(),
+        page_balance: CoinBalance::default(),
         limit: 3,
         skipped: 1,
         total: 1,
@@ -3624,6 +3658,26 @@ fn test_account_balance_rpc() {
 
 #[test]
 fn test_scan_for_new_addresses() {
+    static mut ACCOUNT_ID: u32 = 0;
+    static mut NEW_EXTERNAL_ADDRESSES_NUMBER: u32 = 0;
+    static mut NEW_INTERNAL_ADDRESSES_NUMBER: u32 = 0;
+
+    HDWalletMockStorage::update_external_addresses_number.mock_safe(
+        |_, _, account_id, new_external_addresses_number| {
+            assert_eq!(account_id, unsafe { ACCOUNT_ID });
+            assert_eq!(new_external_addresses_number, unsafe { NEW_EXTERNAL_ADDRESSES_NUMBER });
+            MockResult::Return(Box::pin(futures::future::ok(())))
+        },
+    );
+
+    HDWalletMockStorage::update_internal_addresses_number.mock_safe(
+        |_, _, account_id, new_internal_addresses_number| {
+            assert_eq!(account_id, unsafe { ACCOUNT_ID });
+            assert_eq!(new_internal_addresses_number, unsafe { NEW_INTERNAL_ADDRESSES_NUMBER });
+            MockResult::Return(Box::pin(futures::future::ok(())))
+        },
+    );
+
     let mut checking_addresses: HashMap<String, Option<u64>> = HashMap::new();
     let mut non_empty_addresses: Vec<String> = Vec::new();
     let mut balances_by_der_path: HashMap<String, HDAddressBalance> = HashMap::new();
@@ -3731,6 +3785,7 @@ fn test_scan_for_new_addresses() {
         internal_addresses_number: 2,
     });
     fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
+        hd_wallet_storage: HDWalletCoinStorage::default(),
         address_format: UtxoAddressFormat::Standard,
         derivation_path: Bip44PathToCoin::from_str("m/44'/141'").unwrap(),
         accounts: HDAccountsMutex::new(hd_accounts),
@@ -3739,6 +3794,12 @@ fn test_scan_for_new_addresses() {
     let coin = utxo_coin_from_fields(fields);
 
     // Check balance of Account#0
+
+    unsafe {
+        ACCOUNT_ID = 0;
+        NEW_EXTERNAL_ADDRESSES_NUMBER = 4;
+        NEW_INTERNAL_ADDRESSES_NUMBER = 4;
+    }
 
     let params = CheckHDAccountBalanceParams {
         account_index: 0,
@@ -3758,6 +3819,12 @@ fn test_scan_for_new_addresses() {
     assert_eq!(actual, expected);
 
     // Check balance of Account#1
+
+    unsafe {
+        ACCOUNT_ID = 1;
+        NEW_EXTERNAL_ADDRESSES_NUMBER = 5;
+        NEW_INTERNAL_ADDRESSES_NUMBER = 2;
+    }
 
     let params = CheckHDAccountBalanceParams {
         account_index: 1,

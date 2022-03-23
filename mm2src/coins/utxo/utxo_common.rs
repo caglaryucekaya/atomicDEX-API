@@ -1,7 +1,9 @@
 use super::*;
 use crate::coin_balance::{AddressBalanceStatus, HDAddressBalance, HDWalletBalanceOps};
 use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
-use crate::hd_wallet::{AddressDerivingError, HDAccountMut, NewAccountCreatingError};
+use crate::hd_wallet::{AccountUpdatingError, AddressDerivingError, HDAccountMut, HDAccountsMap,
+                       NewAccountCreatingError};
+use crate::hd_wallet_storage::{HDWalletCoinWithStorageOps, HDWalletStorageResult};
 use crate::init_withdraw::WithdrawTaskHandle;
 use crate::utxo::rpc_clients::{electrum_script_hash, BlockHashOrHeight, UnspentInfo, UtxoRpcClientEnum,
                                UtxoRpcClientOps, UtxoRpcResult};
@@ -12,15 +14,16 @@ use crate::{CanRefundHtlc, CoinBalance, CoinWithDerivationMethod, GetWithdrawSen
 use bigdecimal::{BigDecimal, Zero};
 pub use bitcrypto::{dhash160, sha256, ChecksumType};
 use chain::constants::SEQUENCE_FINAL;
-use chain::{OutPoint, TransactionOutput};
+use chain::{BlockHeader, OutPoint, RawBlockHeader, TransactionOutput};
 use common::executor::Timer;
 use common::jsonrpc_client::JsonRpcErrorType;
-use common::log::{error, info, warn};
+use common::log::{debug, error, info, warn};
 use common::mm_ctx::MmArc;
 use common::mm_error::prelude::*;
 use common::mm_metrics::MetricsArc;
 use common::mm_number::MmNumber;
 use common::now_ms;
+use common::privkey::key_pair_from_secret;
 use crypto::{Bip32DerPathOps, Bip44Chain, Bip44DerPathError, Bip44DerivationPath, RpcDerivationPath};
 use futures::compat::Future01CompatExt;
 use futures::future::{FutureExt, TryFutureExt};
@@ -32,16 +35,20 @@ use rpc::v1::types::{Bytes as BytesJson, TransactionInputEnum, H256 as H256Json}
 use script::{Builder, Opcode, Script, ScriptAddress, TransactionInputSigner, UnsignedTransactionInput};
 use secp256k1::{PublicKey, Signature};
 use serde_json::{self as json};
-use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, SERIALIZE_TRANSACTION_WITNESS};
+use serialization::{deserialize, serialize, serialize_list, serialize_with_flags, CoinVariant,
+                    SERIALIZE_TRANSACTION_WITNESS};
+use spv_validation::helpers_validation::validate_headers;
+use spv_validation::spv_proof::SPVProof;
+use spv_validation::types::SPVError;
 use std::cmp::Ordering;
 use std::collections::hash_map::{Entry, HashMap};
 use std::str::FromStr;
 use std::sync::atomic::Ordering as AtomicOrdering;
+use utxo_block_header_storage::BlockHeaderStorageOps;
 use utxo_signer::with_key_pair::p2sh_spend;
 use utxo_signer::UtxoSignerOps;
 
 pub use chain::Transaction as UtxoTx;
-use common::privkey::key_pair_from_secret;
 
 pub const DEFAULT_FEE_VOUT: usize = 0;
 pub const DEFAULT_SWAP_TX_SPEND_SIZE: u64 = 305;
@@ -64,6 +71,19 @@ lazy_static! {
 }
 
 pub const HISTORY_TOO_LARGE_ERR_CODE: i64 = -1;
+
+fn ten_f64() -> f64 { 10. }
+
+fn one_hundred() -> usize { 100 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct UtxoMergeParams {
+    merge_at: usize,
+    #[serde(default = "ten_f64")]
+    check_every: f64,
+    #[serde(default = "one_hundred")]
+    max_merge_at_once: usize,
+}
 
 pub async fn get_tx_fee(coin: &UtxoCoinFields) -> UtxoRpcResult<ActualTxFee> {
     let conf = &coin.conf;
@@ -115,7 +135,9 @@ pub async fn create_new_account<'a, Coin, XPubExtractor>(
     xpub_extractor: &XPubExtractor,
 ) -> MmResult<HDAccountMut<'a, UtxoHDAccount>, NewAccountCreatingError>
 where
-    Coin: ExtractExtendedPubkey<ExtendedPublicKey = Secp256k1ExtendedPublicKey>,
+    Coin: ExtractExtendedPubkey<ExtendedPublicKey = Secp256k1ExtendedPublicKey>
+        + HDWalletCoinWithStorageOps<HDWallet = UtxoHDWallet, HDAccount = UtxoHDAccount>
+        + Sync,
     XPubExtractor: HDXPubExtractor + Sync,
 {
     const INIT_ACCOUNT_ID: u32 = 0;
@@ -160,6 +182,10 @@ where
         );
         return MmError::err(NewAccountCreatingError::Internal(error));
     }
+
+    coin.upload_new_account(hd_wallet, new_account.to_storage_item())
+        .await?;
+
     Ok(AsyncMutexGuard::map(accounts, |accounts| {
         accounts
             .entry(new_account_id)
@@ -168,27 +194,74 @@ where
     }))
 }
 
-pub async fn produce_hd_address_checker<T>(coin: &T) -> BalanceResult<UtxoAddressBalanceChecker>
+pub async fn set_known_addresses_number<T>(
+    coin: &T,
+    hd_wallet: &UtxoHDWallet,
+    hd_account: &mut UtxoHDAccount,
+    chain: Bip44Chain,
+    new_known_addresses_number: u32,
+) -> MmResult<(), AccountUpdatingError>
+where
+    T: HDWalletCoinWithStorageOps<HDWallet = UtxoHDWallet, HDAccount = UtxoHDAccount> + Sync,
+{
+    if new_known_addresses_number >= ChildNumber::HARDENED_FLAG {
+        return MmError::err(AccountUpdatingError::AddressLimitReached {
+            max_addresses_number: ChildNumber::HARDENED_FLAG,
+        });
+    }
+    match chain {
+        Bip44Chain::External => {
+            coin.update_external_addresses_number(hd_wallet, hd_account.account_id, new_known_addresses_number)
+                .await?;
+            hd_account.external_addresses_number = new_known_addresses_number;
+        },
+        Bip44Chain::Internal => {
+            coin.update_internal_addresses_number(hd_wallet, hd_account.account_id, new_known_addresses_number)
+                .await?;
+            hd_account.internal_addresses_number = new_known_addresses_number;
+        },
+    }
+    Ok(())
+}
+
+pub async fn produce_hd_address_scanner<T>(coin: &T) -> BalanceResult<UtxoAddressScanner>
 where
     T: AsRef<UtxoCoinFields>,
 {
-    Ok(UtxoAddressBalanceChecker::init(coin.as_ref().rpc_client.clone()).await?)
+    Ok(UtxoAddressScanner::init(coin.as_ref().rpc_client.clone()).await?)
 }
 
 pub async fn scan_for_new_addresses<T>(
     coin: &T,
+    hd_wallet: &T::HDWallet,
     hd_account: &mut T::HDAccount,
-    address_checker: &T::HDAddressChecker,
+    address_scanner: &T::HDAddressScanner,
     gap_limit: u32,
 ) -> BalanceResult<Vec<HDAddressBalance>>
 where
     T: HDWalletBalanceOps + Sync,
     T::Address: std::fmt::Display,
 {
-    let mut addresses =
-        scan_for_new_addresses_impl(coin, hd_account, address_checker, Bip44Chain::External, gap_limit).await?;
-    addresses
-        .extend(scan_for_new_addresses_impl(coin, hd_account, address_checker, Bip44Chain::Internal, gap_limit).await?);
+    let mut addresses = scan_for_new_addresses_impl(
+        coin,
+        hd_wallet,
+        hd_account,
+        address_scanner,
+        Bip44Chain::External,
+        gap_limit,
+    )
+    .await?;
+    addresses.extend(
+        scan_for_new_addresses_impl(
+            coin,
+            hd_wallet,
+            hd_account,
+            address_scanner,
+            Bip44Chain::Internal,
+            gap_limit,
+        )
+        .await?,
+    );
 
     Ok(addresses)
 }
@@ -197,8 +270,9 @@ where
 /// The checking stops at the moment when we find `gap_limit` consecutive empty addresses.
 pub async fn scan_for_new_addresses_impl<T>(
     coin: &T,
+    hd_wallet: &T::HDWallet,
     hd_account: &mut T::HDAccount,
-    address_checker: &T::HDAddressChecker,
+    address_scanner: &T::HDAddressScanner,
     chain: Bip44Chain,
     gap_limit: u32,
 ) -> BalanceResult<Vec<HDAddressBalance>>
@@ -222,7 +296,7 @@ where
             ..
         } = coin.derive_address(hd_account, chain, checking_address_id)?;
 
-        match coin.is_address_used(&checking_address, address_checker).await? {
+        match coin.is_address_used(&checking_address, address_scanner).await? {
             // We found a non-empty address, so we have to fill up the balance list
             // with zeros starting from `last_non_empty_address_id = checking_address_id - unused_addresses_counter`.
             AddressBalanceStatus::Used(non_empty_balance) => {
@@ -253,13 +327,66 @@ where
         checking_address_id += 1;
     }
 
-    let known_addresses_number_mut = hd_account
-        .known_addresses_number_mut(chain)
-        // A UTXO coin should support both [`Bip44Chain::External`] and [`Bip44Chain::Internal`].
-        .mm_err(|e| BalanceError::Internal(e.to_string()))?;
-    *known_addresses_number_mut = checking_address_id - unused_addresses_counter;
+    coin.set_known_addresses_number(
+        hd_wallet,
+        hd_account,
+        chain,
+        checking_address_id - unused_addresses_counter,
+    )
+    .await?;
 
     Ok(balances)
+}
+
+pub async fn all_known_addresses_balances<T>(
+    coin: &T,
+    hd_account: &T::HDAccount,
+) -> BalanceResult<Vec<HDAddressBalance>>
+where
+    T: HDWalletBalanceOps + Sync,
+    T::Address: std::fmt::Display,
+{
+    let external_addresses = hd_account
+        .known_addresses_number(Bip44Chain::External)
+        // A UTXO coin should support both [`Bip44Chain::External`] and [`Bip44Chain::Internal`].
+        .mm_err(|e| BalanceError::Internal(e.to_string()))?;
+    let internal_addresses = hd_account
+        .known_addresses_number(Bip44Chain::Internal)
+        // A UTXO coin should support both [`Bip44Chain::External`] and [`Bip44Chain::Internal`].
+        .mm_err(|e| BalanceError::Internal(e.to_string()))?;
+
+    let mut balances = coin
+        .known_addresses_balances_with_ids(hd_account, Bip44Chain::External, 0..external_addresses)
+        .await?;
+    balances.extend(
+        coin.known_addresses_balances_with_ids(hd_account, Bip44Chain::Internal, 0..internal_addresses)
+            .await?,
+    );
+
+    Ok(balances)
+}
+
+pub async fn load_hd_accounts_from_storage(
+    hd_wallet_storage: &HDWalletCoinStorage,
+    derivation_path: &Bip44PathToCoin,
+) -> HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> {
+    let accounts = hd_wallet_storage.load_all_accounts().await?;
+    let res: HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> = accounts
+        .iter()
+        .map(|account_info| {
+            let account = UtxoHDAccount::try_from_storage_item(derivation_path, account_info)?;
+            Ok((account.account_id, account))
+        })
+        .collect();
+    match res {
+        Ok(accounts) => Ok(accounts),
+        Err(e) if e.get_inner().is_deserializing_err() => {
+            warn!("Error loading HD accounts from the storage: '{}'. Clear accounts", e);
+            hd_wallet_storage.clear_accounts().await?;
+            Ok(HDAccountsMap::new())
+        },
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn address_balance<T>(coin: &T, address: &Address) -> BalanceResult<CoinBalance>
@@ -409,11 +536,11 @@ pub fn address_from_str_unchecked(coin: &UtxoCoinFields, address: &str) -> Resul
     return ERR!("Invalid address: {}", address);
 }
 
-pub fn my_public_key(coin: &UtxoCoinFields) -> Result<&Public, MmError<DerivationMethodNotSupported>> {
+pub fn my_public_key(coin: &UtxoCoinFields) -> Result<&Public, MmError<UnexpectedDerivationMethod>> {
     match coin.priv_key_policy {
         PrivKeyPolicy::KeyPair(ref key_pair) => Ok(key_pair.public()),
-        // As of now, Hardware Wallets requires BIP39/BIP44 derivation path to extract a public key
-        PrivKeyPolicy::HardwareWallet => MmError::err(DerivationMethodNotSupported::HdWalletNotSupported),
+        // Hardware Wallets requires BIP39/BIP44 derivation path to extract a public key.
+        PrivKeyPolicy::HardwareWallet => MmError::err(UnexpectedDerivationMethod::IguanaPrivKeyUnavailable),
     }
 }
 
@@ -1366,6 +1493,7 @@ where
         &input.secret_hash,
         input.amount,
         input.time_lock,
+        input.confirmations,
     )
 }
 
@@ -1389,6 +1517,7 @@ where
         &input.secret_hash,
         input.amount,
         input.time_lock,
+        input.confirmations,
     )
 }
 
@@ -2882,6 +3011,60 @@ pub fn address_from_pubkey(
     }
 }
 
+pub async fn validate_spv_proof<T>(coin: T, tx: UtxoTx) -> Result<(), MmError<SPVError>>
+where
+    T: AsRef<UtxoCoinFields> + Send + Sync + 'static,
+{
+    let client = match &coin.as_ref().rpc_client {
+        UtxoRpcClientEnum::Native(_) => return Ok(()),
+        UtxoRpcClientEnum::Electrum(electrum_client) => electrum_client,
+    };
+    if tx.outputs.is_empty() {
+        return MmError::err(SPVError::InvalidVout);
+    }
+    let height = get_tx_height(&tx, client).await?;
+    let block_header = block_header_from_storage_or_rpc(&coin, height, &coin.as_ref().block_headers_storage)
+        .await
+        .map_err(|_e| SPVError::UnableToGetHeader)?;
+    let raw_header = RawBlockHeader::new(block_header.raw().take())?;
+
+    let merkle_branch = client
+        .blockchain_transaction_get_merkle(tx.hash().reversed().into(), height)
+        .compat()
+        .await
+        .map_to_mm(|_e| SPVError::UnableToGetMerkle)?;
+    let intermediate_nodes: Vec<H256> = merkle_branch
+        .merkle
+        .into_iter()
+        .map(|hash| hash.reversed().into())
+        .collect();
+    let proof = SPVProof {
+        tx_id: tx.hash(),
+        vin: serialize_list(&tx.inputs).take(),
+        vout: serialize_list(&tx.outputs).take(),
+        index: merkle_branch.pos as u64,
+        confirming_header: block_header,
+        raw_header,
+        intermediate_nodes,
+    };
+    proof.validate().map_err(MmError::new)
+}
+
+pub async fn get_tx_height(tx: &UtxoTx, client: &ElectrumClient) -> Result<u64, MmError<GetTxHeightError>> {
+    for output in tx.outputs.clone() {
+        let script_pubkey_str = hex::encode(electrum_script_hash(&output.script_pubkey));
+        if let Ok(history) = client.scripthash_get_history(script_pubkey_str.as_str()).compat().await {
+            if let Some(item) = history
+                .into_iter()
+                .find(|item| item.tx_hash.reversed() == H256Json(*tx.hash()) && item.height > 0)
+            {
+                return Ok(item.height as u64);
+            }
+        }
+    }
+    MmError::err(GetTxHeightError::HeightNotFound)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn validate_payment<T>(
     coin: T,
@@ -2892,6 +3075,7 @@ pub fn validate_payment<T>(
     priv_bn_hash: &[u8],
     amount: BigDecimal,
     time_lock: u32,
+    confirmations: u64,
 ) -> Box<dyn Future<Item = (), Error = String> + Send>
 where
     T: AsRef<UtxoCoinFields> + Send + Sync + 'static,
@@ -2947,7 +3131,10 @@ where
                     expected_output
                 );
             }
-            return Ok(());
+            return match confirmations {
+                0 => Ok(()),
+                _ => validate_spv_proof(coin, tx).await.map_err(|e| format!("{:?}", e)),
+            };
         }
     };
     Box::new(fut.boxed().compat())
@@ -3187,6 +3374,150 @@ where
 fn increase_by_percent(num: u64, percent: f64) -> u64 {
     let percent = num as f64 / 100. * percent;
     num + (percent.round() as u64)
+}
+
+pub async fn valid_block_header_from_storage<T>(
+    coin: &T,
+    height: u64,
+    storage: &BlockHeaderStorage,
+    client: &ElectrumClient,
+) -> Result<BlockHeader, MmError<GetBlockHeaderError>>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    match storage
+        .get_block_header(coin.as_ref().conf.ticker.as_str(), height)
+        .await?
+    {
+        None => {
+            let bytes = client.blockchain_block_header(height).compat().await?;
+            let header: BlockHeader = deserialize(bytes.0.as_slice())?;
+            let params = &storage.params;
+            let blocks_limit = params.blocks_limit_to_check;
+            let (headers_registry, headers) = client.retrieve_last_headers(blocks_limit, height).compat().await?;
+            match spv_validation::helpers_validation::validate_headers(
+                headers,
+                params.difficulty_check,
+                params.constant_difficulty,
+            ) {
+                Ok(_) => {
+                    storage
+                        .add_block_headers_to_storage(coin.as_ref().conf.ticker.as_str(), headers_registry)
+                        .await?;
+                    Ok(header)
+                },
+                Err(err) => MmError::err(GetBlockHeaderError::SPVError(err)),
+            }
+        },
+        Some(header) => Ok(header),
+    }
+}
+
+pub async fn block_header_from_storage_or_rpc<T>(
+    coin: &T,
+    height: u64,
+    storage: &Option<BlockHeaderStorage>,
+) -> Result<BlockHeader, MmError<GetBlockHeaderError>>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    let client = match &coin.as_ref().rpc_client {
+        UtxoRpcClientEnum::Native(_) => {
+            return MmError::err(GetBlockHeaderError::NativeNotSupported(
+                "Native client not supported".to_string(),
+            ))
+        },
+        UtxoRpcClientEnum::Electrum(client) => client,
+    };
+
+    match storage {
+        Some(ref storage) => valid_block_header_from_storage(&coin, height, storage, client).await,
+        None => Ok(deserialize(
+            client.blockchain_block_header(height).compat().await?.as_slice(),
+        )?),
+    }
+}
+
+macro_rules! try_loop_with_sleep {
+    ($e:expr, $delay: ident) => {
+        match $e {
+            Ok(res) => res,
+            Err(e) => {
+                error!("error {:?}", e);
+                Timer::sleep($delay).await;
+                continue;
+            },
+        }
+    };
+}
+
+pub async fn block_header_utxo_loop<T>(weak: UtxoWeak, constructor: impl Fn(UtxoArc) -> T)
+where
+    T: AsRef<UtxoCoinFields> + UtxoCommonOps,
+{
+    {
+        let coin = match weak.upgrade() {
+            Some(arc) => constructor(arc),
+            None => return,
+        };
+        let ticker = coin.as_ref().conf.ticker.as_str();
+        let storage = match &coin.as_ref().block_headers_storage {
+            None => return,
+            Some(storage) => storage,
+        };
+        match storage.is_initialized_for(ticker).await {
+            Ok(true) => info!("Block Header Storage already initialized for {}", ticker),
+            Ok(false) => {
+                if let Err(e) = storage.init(ticker).await {
+                    error!(
+                        "Couldn't initiate storage - aborting the block_header_utxo_loop: {:?}",
+                        e
+                    );
+                    return;
+                }
+                info!("Block Header Storage successfully initialized for {}", ticker);
+            },
+            Err(_e) => return,
+        };
+    }
+    while let Some(arc) = weak.upgrade() {
+        let coin = constructor(arc);
+        let storage = match &coin.as_ref().block_headers_storage {
+            None => break,
+            Some(storage) => storage,
+        };
+        let params = storage.params.clone();
+        let (check_every, blocks_limit_to_check, difficulty_check, constant_difficulty) = (
+            params.check_every,
+            params.blocks_limit_to_check,
+            params.difficulty_check,
+            params.constant_difficulty,
+        );
+        let height = try_loop_with_sleep!(coin.as_ref().rpc_client.get_block_count().compat().await, check_every);
+        let client = match &coin.as_ref().rpc_client {
+            UtxoRpcClientEnum::Native(_) => break,
+            UtxoRpcClientEnum::Electrum(client) => client,
+        };
+        let (block_registry, block_headers) = try_loop_with_sleep!(
+            client
+                .retrieve_last_headers(blocks_limit_to_check, height)
+                .compat()
+                .await,
+            check_every
+        );
+        try_loop_with_sleep!(
+            validate_headers(block_headers, difficulty_check, constant_difficulty),
+            check_every
+        );
+
+        let ticker = coin.as_ref().conf.ticker.as_str();
+        try_loop_with_sleep!(
+            storage.add_block_headers_to_storage(ticker, block_registry).await,
+            check_every
+        );
+        debug!("tick block_header_utxo_loop for {}", coin.as_ref().conf.ticker);
+        Timer::sleep(check_every).await;
+    }
 }
 
 pub async fn merge_utxo_loop<T>(
