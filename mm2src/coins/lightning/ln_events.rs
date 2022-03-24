@@ -30,35 +30,53 @@ impl EventHandler for LightningEventHandler {
                 channel_value_satoshis,
                 output_script,
                 user_channel_id,
-            } => self.handle_funding_generation_ready(*temporary_channel_id, *channel_value_satoshis, output_script, *user_channel_id),
+            } => self.handle_funding_generation_ready(
+                *temporary_channel_id,
+                *channel_value_satoshis,
+                output_script,
+                *user_channel_id,
+            ),
+
             Event::PaymentReceived {
                 payment_hash,
                 amt,
                 purpose,
             } => self.handle_payment_received(*payment_hash, *amt, purpose),
+
             Event::PaymentSent {
                 payment_preimage,
                 payment_hash,
                 fee_paid_msat,
                 ..
             } => self.handle_payment_sent(*payment_preimage, *payment_hash, *fee_paid_msat),
+
             Event::PaymentFailed { payment_hash, .. } => self.handle_payment_failed(*payment_hash),
+
             Event::PendingHTLCsForwardable { time_forwardable } => self.handle_pending_htlcs_forwards(*time_forwardable),
+
             Event::SpendableOutputs { outputs } => self.handle_spendable_outputs(outputs),
+
             // Todo: an RPC for total amount earned
             Event::PaymentForwarded { fee_earned_msat, claim_from_onchain_tx } => log::info!(
-                    "Recieved a fee of {} milli-satoshis for a successfully forwarded payment through our {} lightning node. Was the forwarded HTLC claimed by our counterparty via an on-chain transaction?: {}",
-                    fee_earned_msat.unwrap_or_default(),
-                    self.platform.coin.ticker(),
-                    claim_from_onchain_tx,
-                ),
-            Event::ChannelClosed { channel_id, user_channel_id, reason } => self.handle_channel_closed(*channel_id, *user_channel_id, reason.to_string()),
+                "Recieved a fee of {} milli-satoshis for a successfully forwarded payment through our {} lightning node. Was the forwarded HTLC claimed by our counterparty via an on-chain transaction?: {}",
+                fee_earned_msat.unwrap_or_default(),
+                self.platform.coin.ticker(),
+                claim_from_onchain_tx,
+            ),
+
+            Event::ChannelClosed {
+                channel_id,
+                user_channel_id,
+                reason,
+            } => self.handle_channel_closed(*channel_id, *user_channel_id, reason.to_string()),
+
             // Todo: Add spent UTXOs to RecentlySpentOutPoints if it's not discarded
             Event::DiscardFunding { channel_id, transaction } => log::info!(
-                    "Discarding funding tx: {} for channel {}",
-                    transaction.txid().to_string(),
-                    hex::encode(channel_id),
-                ),
+                "Discarding funding tx: {} for channel {}",
+                transaction.txid().to_string(),
+                hex::encode(channel_id),
+            ),
+
             // Handling updating channel penalties after successfully routing a payment along a path is done by the InvoicePayer.
             Event::PaymentPathSuccessful {
                 payment_id,
@@ -70,17 +88,41 @@ impl EventHandler for LightningEventHandler {
                 payment_hash.map(|h| hex::encode(h.0)).unwrap_or_default(),
                 hex::encode(payment_id.0)
             ),
+
             // Handling updating channel penalties after a payment fails to route through a channel is done by the InvoicePayer.
             // Also abandoning or retrying a payment is handled by the InvoicePayer. 
-            Event::PaymentPathFailed { payment_hash, rejected_by_dest, all_paths_failed, path, .. } => log::info!(
+            Event::PaymentPathFailed {
+                payment_hash,
+                rejected_by_dest,
+                all_paths_failed,
+                path,
+                ..
+            } => log::info!(
                 "Payment path: {:?}, failed for payment hash: {}, Was rejected by destination?: {}, All paths failed?: {}",
                 path.iter().map(|hop| hop.pubkey.to_string()).collect::<Vec<_>>(),
                 hex::encode(payment_hash.0),
                 rejected_by_dest,
                 all_paths_failed,
             ),
-            // Todo: Handle inbound channels
-            Event::OpenChannelRequest { .. } => {},
+
+            Event::OpenChannelRequest {
+                temporary_channel_id,
+                counterparty_node_id,
+                funding_satoshis,
+                push_msat,
+            } => {
+                log::info!(
+                    "Handling OpenChannelRequest from node: {} with funding value: {} and starting balance: {}",
+                    counterparty_node_id,
+                    funding_satoshis,
+                    push_msat,
+                );
+                if self.channel_manager.accept_inbound_channel(temporary_channel_id).is_ok() {
+                    // Todo: once the rust-lightning PR for user_channel_id in accept_inbound_channel is released
+                    // use user_channel_id to get the funding tx here once the funding tx is available.
+                    unimplemented!()
+                }
+            },
         }
     }
 }

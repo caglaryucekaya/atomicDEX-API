@@ -241,6 +241,8 @@ impl From<LightningCoinConf> for UserConfig {
         if let Some(accept_inbound) = conf.accept_inbound_channels {
             user_config.accept_inbound_channels = accept_inbound;
         }
+        // This allows OpenChannelRequest event to be fired
+        user_config.manually_accept_inbound_channels = true;
 
         user_config
     }
