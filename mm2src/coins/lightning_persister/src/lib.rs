@@ -107,7 +107,7 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         closing_tx VARCHAR(255),
         closure_reason TEXT,
         claiming_tx VARCHAR(255),
-        claimed_balance INTEGER,
+        claimed_balance REAL,
         is_outbound INTEGER NOT NULL,
         is_public INTEGER NOT NULL,
         is_closed INTEGER NOT NULL
@@ -189,7 +189,7 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
         closing_tx: row.get(6).ok(),
         closure_reason: row.get(7).ok(),
         claiming_tx: row.get(8).ok(),
-        claimed_balance: row.get::<_, u32>(9).ok().map(|b| b as u64),
+        claimed_balance: row.get::<_, f64>(9).ok(),
         is_outbound: row.get(10)?,
         is_public: row.get(11)?,
         is_closed: row.get(12)?,
@@ -915,7 +915,7 @@ impl SqlStorage for LightningPersister {
         &self,
         closing_tx: String,
         claiming_tx: String,
-        claimed_balance: u64,
+        claimed_balance: f64,
     ) -> Result<(), Self::Error> {
         let for_coin = self.storage_ticker.clone();
         let claimed_balance = claimed_balance.to_string();
@@ -1267,12 +1267,12 @@ mod tests {
         block_on(persister.add_claiming_tx_to_sql(
             "5557df9ad2c9b3c57a4df8b4a7da0b7a6f4e923b4a01daa98bf9e5a3b33e9c8f".into(),
             "97f061634a4a7b0b0c2b95648f86b1c39b95e0cf5073f07725b7143c095b612a".into(),
-            2000,
+            2000.333333,
         ))
         .unwrap();
         expected_channel_details.claiming_tx =
             Some("97f061634a4a7b0b0c2b95648f86b1c39b95e0cf5073f07725b7143c095b612a".into());
-        expected_channel_details.claimed_balance = Some(2000);
+        expected_channel_details.claimed_balance = Some(2000.333333);
 
         let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
         assert_eq!(expected_channel_details, actual_channel_details);

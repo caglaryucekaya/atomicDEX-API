@@ -1022,6 +1022,7 @@ pub struct ListPaymentsReq {
 
 #[derive(Serialize)]
 pub struct PaymentInfoForRPC {
+    payment_hash: H256Json,
     amount_in_msat: Option<u64>,
     fee_paid_msat: Option<u64>,
     status: HTLCStatus,
@@ -1030,6 +1031,7 @@ pub struct PaymentInfoForRPC {
 impl From<PaymentInfo> for PaymentInfoForRPC {
     fn from(info: PaymentInfo) -> Self {
         PaymentInfoForRPC {
+            payment_hash: info.payment_hash.0.into(),
             amount_in_msat: info.amt_msat,
             fee_paid_msat: info.fee_paid_msat,
             status: info.status,

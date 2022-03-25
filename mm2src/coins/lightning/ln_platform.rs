@@ -240,10 +240,7 @@ impl Platform {
         registered_outputs.push(output);
     }
 
-    async fn process_tx_for_unconfirmation<T>(&self, txid: Txid, monitor: Arc<T>)
-    where
-        T: Confirm,
-    {
+    async fn check_if_tx_is_onchain(&self, txid: Txid) -> Result<bool, MmError<UtxoRpcError>> {
         if let Err(err) = self
             .coin
             .as_ref()
@@ -257,21 +254,35 @@ impl Platform {
                 if let JsonRpcErrorType::Response(_, json) = &json_err.error {
                     if let Some(message) = json["message"].as_str() {
                         if message.contains("'code': -5") {
-                            log::info!(
-                                "Transaction {} is not found on chain :{}. The transaction will be re-broadcasted.",
-                                txid,
-                                err
-                            );
-                            monitor.transaction_unconfirmed(&txid);
+                            return Ok(false);
                         }
                     }
                 }
             }
-            log::error!(
+            return Err(err.into());
+        }
+        Ok(true)
+    }
+
+    async fn process_tx_for_unconfirmation<T>(&self, txid: Txid, monitor: Arc<T>)
+    where
+        T: Confirm,
+    {
+        match self.check_if_tx_is_onchain(txid).await {
+            Ok(tx_is_onchain) => {
+                if !tx_is_onchain {
+                    log::info!(
+                        "Transaction {} is not found on chain. The transaction will be re-broadcasted.",
+                        txid,
+                    );
+                    monitor.transaction_unconfirmed(&txid);
+                }
+            },
+            Err(e) => log::error!(
                 "Error while trying to check if the transaction {} is discarded or not :{}",
                 txid,
-                err
-            );
+                e
+            ),
         }
     }
 
@@ -513,14 +524,22 @@ impl FeeEstimator for Platform {
 
 impl BroadcasterInterface for Platform {
     fn broadcast_transaction(&self, tx: &Transaction) {
+        let txid = tx.txid();
+        let fut = Box::new(async move { self.check_if_tx_is_onchain(txid).await }.boxed().compat());
+        let is_tx_onchain = tokio::task::block_in_place(move || fut.wait());
+
+        if let Ok(true) = is_tx_onchain {
+            log::debug!("Transaction {} is found onchain!", txid);
+            return;
+        }
+
         let tx_hex = serialize_hex(tx);
         log::debug!("Trying to broadcast transaction: {}", tx_hex);
-        let tx_id = tx.txid();
         let fut = self.coin.send_raw_tx(&tx_hex);
         spawn(async move {
             match fut.compat().await {
                 Ok(id) => log::info!("Transaction broadcasted successfully: {:?} ", id),
-                Err(e) => log::error!("Broadcast transaction {} failed: {}", tx_id, e),
+                Err(e) => log::error!("Broadcast transaction {} failed: {}", txid, e),
             }
         });
     }

@@ -54,7 +54,7 @@ pub struct SqlChannelDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claiming_tx: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claimed_balance: Option<u64>,
+    pub claimed_balance: Option<f64>,
     #[serde(skip_serializing)]
     pub funding_generated_in_block: Option<u64>,
     pub is_outbound: bool,
@@ -172,6 +172,6 @@ pub trait SqlStorage {
         &self,
         closing_tx: String,
         claiming_tx: String,
-        claimed_balance: u64,
+        claimed_balance: f64,
     ) -> Result<(), Self::Error>;
 }

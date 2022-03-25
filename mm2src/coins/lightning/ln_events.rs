@@ -429,6 +429,23 @@ impl LightningEventHandler {
 
         self.platform.broadcast_transaction(&spending_tx);
 
+        let claiming_tx_inputs_value = outputs.iter().fold(0, |sum, output| match output {
+            SpendableOutputDescriptor::StaticOutput { output, .. } => sum + output.value,
+            SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => sum + descriptor.output.value,
+            SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => sum + descriptor.output.value,
+        });
+        let claiming_tx_outputs_value = spending_tx.output.iter().fold(0, |sum, txout| sum + txout.value);
+        if claiming_tx_inputs_value < claiming_tx_outputs_value {
+            log::error!(
+                "Claiming transaction input value {} can't be less than outputs value {}!",
+                claiming_tx_inputs_value,
+                claiming_tx_outputs_value
+            );
+            return;
+        }
+        let claiming_tx_fee = claiming_tx_inputs_value - claiming_tx_outputs_value;
+        let claiming_tx_fee_per_channel = (claiming_tx_fee as f64) / (outputs.len() as f64);
+
         for output in outputs {
             let (closing_txid, claimed_balance) = match output {
                 SpendableOutputDescriptor::StaticOutput { outpoint, output } => {
@@ -445,7 +462,11 @@ impl LightningEventHandler {
             let persister = self.persister.clone();
             spawn(async move {
                 persister
-                    .add_claiming_tx_to_sql(closing_txid, claiming_txid, claimed_balance)
+                    .add_claiming_tx_to_sql(
+                        closing_txid,
+                        claiming_txid,
+                        (claimed_balance as f64) - claiming_tx_fee_per_channel,
+                    )
                     .await
                     .error_log();
             });
