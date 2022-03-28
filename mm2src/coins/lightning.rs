@@ -39,7 +39,7 @@ use lightning::util::config::UserConfig;
 use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
-use lightning_invoice::Invoice;
+use lightning_invoice::{Invoice, InvoiceDescription};
 use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo, PaymentType,
                                    Scorer, SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
@@ -128,10 +128,15 @@ impl LightningCoin {
         let payment_type = PaymentType::OutboundPayment {
             destination: invoice.payee_pub_key().cloned(),
         };
+        let description = Some(match invoice.description() {
+            InvoiceDescription::Direct(d) => d.to_string(),
+            InvoiceDescription::Hash(h) => hex::encode(h.0.into_inner()),
+        });
         let payment_secret = Some(*invoice.payment_secret());
         Ok(PaymentInfo {
             payment_hash,
             payment_type,
+            description,
             preimage: None,
             secret: payment_secret,
             amt_msat: invoice.amount_milli_satoshis(),
@@ -164,6 +169,7 @@ impl LightningCoin {
         Ok(PaymentInfo {
             payment_hash,
             payment_type,
+            description: None,
             preimage: Some(payment_preimage),
             secret: None,
             amt_msat: Some(amount_msat),
@@ -954,10 +960,22 @@ pub async fn generate_invoice(
         ln_coin.keys_manager,
         network,
         req.amount_in_msat,
-        req.description,
+        req.description.clone(),
     )?;
+    let payment_hash = invoice.payment_hash().into_inner();
+    let payment_info = PaymentInfo {
+        payment_hash: PaymentHash(payment_hash),
+        payment_type: PaymentType::InboundPayment,
+        description: Some(req.description),
+        preimage: None,
+        secret: Some(*invoice.payment_secret()),
+        amt_msat: req.amount_in_msat,
+        fee_paid_msat: None,
+        status: HTLCStatus::Pending,
+    };
+    ln_coin.persister.add_or_update_payment_in_sql(payment_info).await?;
     Ok(GenerateInvoiceResponse {
-        payment_hash: invoice.payment_hash().into_inner().into(),
+        payment_hash: payment_hash.into(),
         invoice: invoice.into(),
     })
 }
@@ -1032,7 +1050,10 @@ pub struct ListPaymentsReq {
 #[serde(tag = "type")]
 pub enum PaymentTypeForRPC {
     #[serde(rename = "Outbound Payment")]
-    OutboundPayment { destination: Option<PublicKeyForRPC> },
+    OutboundPayment {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<PublicKeyForRPC>,
+    },
     #[serde(rename = "Inbound Payment")]
     InboundPayment,
 }
@@ -1052,7 +1073,11 @@ impl From<PaymentType> for PaymentTypeForRPC {
 pub struct PaymentInfoForRPC {
     payment_hash: H256Json,
     payment_type: PaymentTypeForRPC,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     amount_in_msat: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fee_paid_msat: Option<u64>,
     status: HTLCStatus,
 }
@@ -1062,6 +1087,7 @@ impl From<PaymentInfo> for PaymentInfoForRPC {
         PaymentInfoForRPC {
             payment_hash: info.payment_hash.0.into(),
             payment_type: info.payment_type.into(),
+            description: info.description,
             amount_in_msat: info.amt_msat,
             fee_paid_msat: info.fee_paid_msat,
             status: info.status,

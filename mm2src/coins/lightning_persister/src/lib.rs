@@ -126,6 +126,7 @@ fn create_payments_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         id INTEGER NOT NULL PRIMARY KEY,
         payment_hash VARCHAR(255) NOT NULL UNIQUE,
         destination VARCHAR(255),
+        description VARCHAR(641),
         preimage VARCHAR(255),
         secret VARCHAR(255),
         amount_msat INTEGER,
@@ -154,7 +155,7 @@ fn insert_or_update_payment_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT OR REPLACE INTO ".to_owned()
         + &table_name
-        + " (payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
+        + " (payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);";
 
     Ok(sql)
 }
@@ -173,7 +174,7 @@ fn select_payment_from_table_by_hash_sql(for_coin: &str) -> Result<String, SqlEr
     validate_table_name(&table_name)?;
 
     let sql =
-        "SELECT payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
             .to_owned()
             + &table_name
             + " WHERE payment_hash=?1;";
@@ -201,7 +202,7 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
 }
 
 fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
-    let is_outbound = row.get::<_, bool>(7)?;
+    let is_outbound = row.get::<_, bool>(8)?;
     let payment_type = match is_outbound {
         true => PaymentType::OutboundPayment {
             destination: row
@@ -219,7 +220,8 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
                 .expect("String should be 64 characters!"),
         ),
         payment_type,
-        preimage: row.get::<_, String>(2).ok().map(|p| {
+        description: row.get(2).ok(),
+        preimage: row.get::<_, String>(3).ok().map(|p| {
             PaymentPreimage(
                 hex::decode(p)
                     .expect("Preimage decoding should not fail!")
@@ -227,7 +229,7 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
                     .expect("String should be 64 characters!"),
             )
         }),
-        secret: row.get::<_, String>(3).ok().map(|s| {
+        secret: row.get::<_, String>(4).ok().map(|s| {
             PaymentSecret(
                 hex::decode(s)
                     .expect("Secret decoding should not fail!")
@@ -235,9 +237,9 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
                     .expect("String should be 64 characters!"),
             )
         }),
-        amt_msat: row.get::<_, u32>(4).ok().map(|v| v as u64),
-        fee_paid_msat: row.get::<_, u32>(5).ok().map(|v| v as u64),
-        status: HTLCStatus::from_str(&row.get::<_, String>(6)?)?,
+        amt_msat: row.get::<_, u32>(5).ok().map(|v| v as u64),
+        fee_paid_msat: row.get::<_, u32>(6).ok().map(|v| v as u64),
+        status: HTLCStatus::from_str(&row.get::<_, String>(7)?)?,
     };
     Ok(payment_info)
 }
@@ -294,7 +296,7 @@ fn get_outbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
     validate_table_name(&table_name)?;
 
     let sql =
-        "SELECT payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
             .to_owned()
             + &table_name
             + " WHERE is_outbound = 1;";
@@ -307,7 +309,7 @@ fn get_inbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
     validate_table_name(&table_name)?;
 
     let sql =
-        "SELECT payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
             .to_owned()
             + &table_name
             + " WHERE is_outbound = 0;";
@@ -756,6 +758,7 @@ impl SqlStorage for LightningPersister {
             PaymentType::OutboundPayment { destination } => (true as i32, destination.map(|d| d.to_string())),
             PaymentType::InboundPayment => (false as i32, None),
         };
+        let description = info.description;
         let preimage = info.preimage.map(|p| hex::encode(p.0));
         let secret = info.secret.map(|s| hex::encode(s.0));
         let amount_msat = info.amt_msat.map(|a| a as u32);
@@ -767,6 +770,7 @@ impl SqlStorage for LightningPersister {
             let params = [
                 &payment_hash as &dyn ToSql,
                 &destination as &dyn ToSql,
+                &description as &dyn ToSql,
                 &preimage as &dyn ToSql,
                 &secret as &dyn ToSql,
                 &amount_msat as &dyn ToSql,
@@ -1305,6 +1309,7 @@ mod tests {
         let mut expected_payment_info = PaymentInfo {
             payment_hash: PaymentHash([0; 32]),
             payment_type: PaymentType::InboundPayment,
+            description: Some("test payment".into()),
             preimage: Some(PaymentPreimage([2; 32])),
             secret: Some(PaymentSecret([3; 32])),
             amt_msat: Some(2000),

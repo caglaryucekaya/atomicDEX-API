@@ -292,6 +292,8 @@ pub enum GenerateInvoiceError {
     NoSuchCoin(String),
     #[display(fmt = "Invoice signing or creation error: {}", _0)]
     SignOrCreationError(String),
+    #[display(fmt = "SQL error {}", _0)]
+    SqlError(String),
 }
 
 impl HttpStatusCode for GenerateInvoiceError {
@@ -299,7 +301,9 @@ impl HttpStatusCode for GenerateInvoiceError {
         match self {
             GenerateInvoiceError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             GenerateInvoiceError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
-            GenerateInvoiceError::SignOrCreationError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            GenerateInvoiceError::SignOrCreationError(_) | GenerateInvoiceError::SqlError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
         }
     }
 }
@@ -314,6 +318,10 @@ impl From<CoinFindError> for GenerateInvoiceError {
 
 impl From<SignOrCreationError> for GenerateInvoiceError {
     fn from(e: SignOrCreationError) -> Self { GenerateInvoiceError::SignOrCreationError(e.to_string()) }
+}
+
+impl From<SqlError> for GenerateInvoiceError {
+    fn from(err: SqlError) -> GenerateInvoiceError { GenerateInvoiceError::SqlError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]

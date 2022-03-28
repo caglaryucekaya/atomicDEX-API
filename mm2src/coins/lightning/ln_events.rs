@@ -250,21 +250,40 @@ impl LightningEventHandler {
             },
             false => HTLCStatus::Failed,
         };
-        let payment_info = PaymentInfo {
-            payment_hash,
-            payment_type: PaymentType::InboundPayment,
-            preimage: Some(payment_preimage),
-            secret: payment_secret,
-            amt_msat: Some(amt),
-            fee_paid_msat: None,
-            status,
-        };
         let persister = self.persister.clone();
-        spawn(async move {
-            if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
-                log::error!("{}", e);
-            }
-        });
+        match purpose {
+            PaymentPurpose::InvoicePayment { .. } => spawn(async move {
+                if let Ok(Some(mut payment_info)) = persister
+                    .get_payment_from_sql(payment_hash)
+                    .await
+                    .error_log_passthrough()
+                {
+                    payment_info.preimage = Some(payment_preimage);
+                    payment_info.status = HTLCStatus::Succeeded;
+                    payment_info.amt_msat = Some(amt);
+                    if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
+                        log::error!("{}", e);
+                    }
+                }
+            }),
+            PaymentPurpose::SpontaneousPayment(_) => {
+                let payment_info = PaymentInfo {
+                    payment_hash,
+                    payment_type: PaymentType::InboundPayment,
+                    description: None,
+                    preimage: Some(payment_preimage),
+                    secret: payment_secret,
+                    amt_msat: Some(amt),
+                    fee_paid_msat: None,
+                    status,
+                };
+                spawn(async move {
+                    if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
+                        log::error!("{}", e);
+                    }
+                });
+            },
+        }
     }
 
     fn handle_payment_sent(
