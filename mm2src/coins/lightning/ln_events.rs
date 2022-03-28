@@ -120,7 +120,6 @@ impl EventHandler for LightningEventHandler {
                 if self.channel_manager.accept_inbound_channel(temporary_channel_id).is_ok() {
                     // Todo: once the rust-lightning PR for user_channel_id in accept_inbound_channel is released
                     // use user_channel_id to get the funding tx here once the funding tx is available.
-                    unimplemented!()
                 }
             },
         }
@@ -253,6 +252,7 @@ impl LightningEventHandler {
         };
         let payment_info = PaymentInfo {
             payment_hash,
+            payment_type: PaymentType::InboundPayment,
             preimage: Some(payment_preimage),
             secret: payment_secret,
             amt_msat: Some(amt),
@@ -261,10 +261,7 @@ impl LightningEventHandler {
         };
         let persister = self.persister.clone();
         spawn(async move {
-            if let Err(e) = persister
-                .add_or_update_payment_in_sql(payment_info, PaymentType::InboundPayment)
-                .await
-            {
+            if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
                 log::error!("{}", e);
             }
         });
@@ -282,7 +279,7 @@ impl LightningEventHandler {
         );
         let persister = self.persister.clone();
         spawn(async move {
-            if let Ok(Some((mut payment_info, payment_type))) = persister
+            if let Ok(Some(mut payment_info)) = persister
                 .get_payment_from_sql(payment_hash)
                 .await
                 .error_log_passthrough()
@@ -292,7 +289,7 @@ impl LightningEventHandler {
                 payment_info.fee_paid_msat = fee_paid_msat;
                 let amt_msat = payment_info.amt_msat;
                 if let Err(e) = persister
-                    .add_or_update_payment_in_sql(payment_info, payment_type)
+                    .add_or_update_payment_in_sql(payment_info)
                     .await
                     .error_log_passthrough()
                 {
@@ -375,13 +372,13 @@ impl LightningEventHandler {
         );
         let persister = self.persister.clone();
         spawn(async move {
-            if let Ok(Some((mut payment_info, payment_type))) = persister
+            if let Ok(Some(mut payment_info)) = persister
                 .get_payment_from_sql(payment_hash)
                 .await
                 .error_log_passthrough()
             {
                 payment_info.status = HTLCStatus::Failed;
-                if let Err(e) = persister.add_or_update_payment_in_sql(payment_info, payment_type).await {
+                if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
                     log::error!("{}", e);
                 }
             }

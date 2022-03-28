@@ -125,6 +125,7 @@ fn create_payments_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         + " (
         id INTEGER NOT NULL PRIMARY KEY,
         payment_hash VARCHAR(255) NOT NULL UNIQUE,
+        destination VARCHAR(255),
         preimage VARCHAR(255),
         secret VARCHAR(255),
         amount_msat INTEGER,
@@ -153,7 +154,7 @@ fn insert_or_update_payment_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT OR REPLACE INTO ".to_owned()
         + &table_name
-        + " (payment_hash, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
+        + " (payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
 
     Ok(sql)
 }
@@ -171,9 +172,11 @@ fn select_payment_from_table_by_hash_sql(for_coin: &str) -> Result<String, SqlEr
     let table_name = payments_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT payment_hash, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM ".to_owned()
-        + &table_name
-        + " WHERE payment_hash=?1;";
+    let sql =
+        "SELECT payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+            .to_owned()
+            + &table_name
+            + " WHERE payment_hash=?1;";
 
     Ok(sql)
 }
@@ -197,7 +200,17 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
     Ok(channel_details)
 }
 
-fn payment_info_from_row(row: &Row<'_>) -> Result<(PaymentInfo, PaymentType), SqlError> {
+fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
+    let is_outbound = row.get::<_, bool>(7)?;
+    let payment_type = match is_outbound {
+        true => PaymentType::OutboundPayment {
+            destination: row
+                .get::<_, String>(1)
+                .ok()
+                .map(|d| PublicKey::from_str(&d).expect("PublicKey from str should not fail!")),
+        },
+        false => PaymentType::InboundPayment,
+    };
     let payment_info = PaymentInfo {
         payment_hash: PaymentHash(
             hex::decode(row.get::<_, String>(0)?)
@@ -205,7 +218,8 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<(PaymentInfo, PaymentType), Sq
                 .try_into()
                 .expect("String should be 64 characters!"),
         ),
-        preimage: row.get::<_, String>(1).ok().map(|p| {
+        payment_type,
+        preimage: row.get::<_, String>(2).ok().map(|p| {
             PaymentPreimage(
                 hex::decode(p)
                     .expect("Preimage decoding should not fail!")
@@ -213,7 +227,7 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<(PaymentInfo, PaymentType), Sq
                     .expect("String should be 64 characters!"),
             )
         }),
-        secret: row.get::<_, String>(2).ok().map(|s| {
+        secret: row.get::<_, String>(3).ok().map(|s| {
             PaymentSecret(
                 hex::decode(s)
                     .expect("Secret decoding should not fail!")
@@ -221,16 +235,11 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<(PaymentInfo, PaymentType), Sq
                     .expect("String should be 64 characters!"),
             )
         }),
-        amt_msat: row.get::<_, u32>(3).ok().map(|v| v as u64),
-        fee_paid_msat: row.get::<_, u32>(4).ok().map(|v| v as u64),
-        status: HTLCStatus::from_str(&row.get::<_, String>(5)?)?,
+        amt_msat: row.get::<_, u32>(4).ok().map(|v| v as u64),
+        fee_paid_msat: row.get::<_, u32>(5).ok().map(|v| v as u64),
+        status: HTLCStatus::from_str(&row.get::<_, String>(6)?)?,
     };
-    let is_outbound = row.get::<_, bool>(6)?;
-    let payment_type = match is_outbound {
-        true => PaymentType::OutboundPayment,
-        false => PaymentType::InboundPayment,
-    };
-    Ok((payment_info, payment_type))
+    Ok(payment_info)
 }
 
 fn get_last_channel_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
@@ -284,9 +293,11 @@ fn get_outbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = payments_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT payment_hash, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM ".to_owned()
-        + &table_name
-        + " WHERE is_outbound = 1;";
+    let sql =
+        "SELECT payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+            .to_owned()
+            + &table_name
+            + " WHERE is_outbound = 1;";
 
     Ok(sql)
 }
@@ -295,9 +306,11 @@ fn get_inbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = payments_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT payment_hash, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM ".to_owned()
-        + &table_name
-        + " WHERE is_outbound = 0;";
+    let sql =
+        "SELECT payment_hash, destination, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+            .to_owned()
+            + &table_name
+            + " WHERE is_outbound = 0;";
 
     Ok(sql)
 }
@@ -736,27 +749,24 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn add_or_update_payment_in_sql(
-        &self,
-        info: PaymentInfo,
-        payment_type: PaymentType,
-    ) -> Result<(), Self::Error> {
+    async fn add_or_update_payment_in_sql(&self, info: PaymentInfo) -> Result<(), Self::Error> {
         let for_coin = self.storage_ticker.clone();
         let payment_hash = hex::encode(info.payment_hash.0);
+        let (is_outbound, destination) = match info.payment_type {
+            PaymentType::OutboundPayment { destination } => (true as i32, destination.map(|d| d.to_string())),
+            PaymentType::InboundPayment => (false as i32, None),
+        };
         let preimage = info.preimage.map(|p| hex::encode(p.0));
         let secret = info.secret.map(|s| hex::encode(s.0));
         let amount_msat = info.amt_msat.map(|a| a as u32);
         let fee_paid_msat = info.fee_paid_msat.map(|f| f as u32);
-        let is_outbound = match payment_type {
-            PaymentType::OutboundPayment => true as i32,
-            PaymentType::InboundPayment => false as i32,
-        };
         let status = info.status.to_string();
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
             let params = [
                 &payment_hash as &dyn ToSql,
+                &destination as &dyn ToSql,
                 &preimage as &dyn ToSql,
                 &secret as &dyn ToSql,
                 &amount_msat as &dyn ToSql,
@@ -785,7 +795,7 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_payment_from_sql(&self, hash: PaymentHash) -> Result<Option<(PaymentInfo, PaymentType)>, Self::Error> {
+    async fn get_payment_from_sql(&self, hash: PaymentHash) -> Result<Option<PaymentInfo>, Self::Error> {
         let params = [hex::encode(hash.0)];
         let sql = select_payment_from_table_by_hash_sql(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
@@ -883,7 +893,7 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_outbound_payments(&self) -> Result<Vec<(PaymentInfo, PaymentType)>, Self::Error> {
+    async fn get_outbound_payments(&self) -> Result<Vec<PaymentInfo>, Self::Error> {
         let sql = get_outbound_payments_sql(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
 
@@ -897,7 +907,7 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_inbound_payments(&self) -> Result<Vec<(PaymentInfo, PaymentType)>, Self::Error> {
+    async fn get_inbound_payments(&self) -> Result<Vec<PaymentInfo>, Self::Error> {
         let sql = get_inbound_payments_sql(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
 
@@ -1294,36 +1304,39 @@ mod tests {
 
         let mut expected_payment_info = PaymentInfo {
             payment_hash: PaymentHash([0; 32]),
+            payment_type: PaymentType::InboundPayment,
             preimage: Some(PaymentPreimage([2; 32])),
             secret: Some(PaymentSecret([3; 32])),
             amt_msat: Some(2000),
             fee_paid_msat: Some(100),
             status: HTLCStatus::Failed,
         };
-        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone(), PaymentType::InboundPayment))
-            .unwrap();
+        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone())).unwrap();
 
         let actual_payment_info = block_on(persister.get_payment_from_sql(PaymentHash([0; 32])))
             .unwrap()
             .unwrap();
-        assert_eq!(expected_payment_info, actual_payment_info.0);
+        assert_eq!(expected_payment_info, actual_payment_info);
 
         expected_payment_info.payment_hash = PaymentHash([1; 32]);
+        expected_payment_info.payment_type = PaymentType::OutboundPayment {
+            destination: Some(
+                PublicKey::from_str("038863cf8ab91046230f561cd5b386cbff8309fa02e3f0c3ed161a3aeb64a643b9").unwrap(),
+            ),
+        };
         expected_payment_info.secret = None;
         expected_payment_info.amt_msat = None;
         expected_payment_info.status = HTLCStatus::Succeeded;
-        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone(), PaymentType::OutboundPayment))
-            .unwrap();
+        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone())).unwrap();
 
         let actual_payment_info = block_on(persister.get_payment_from_sql(PaymentHash([1; 32])))
             .unwrap()
             .unwrap();
-        assert_eq!(expected_payment_info, actual_payment_info.0);
+        assert_eq!(expected_payment_info, actual_payment_info);
 
         // Update the first payment to outbound
         expected_payment_info.payment_hash = PaymentHash([0; 32]);
-        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone(), PaymentType::OutboundPayment))
-            .unwrap();
+        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone())).unwrap();
         let outbound_payments = block_on(persister.get_outbound_payments()).unwrap();
         assert_eq!(outbound_payments.len(), 2);
     }

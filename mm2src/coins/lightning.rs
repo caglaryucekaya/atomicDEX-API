@@ -125,9 +125,13 @@ impl LightningCoin {
             .pay_invoice(&invoice)
             .map_to_mm(|e| SendPaymentError::PaymentError(format!("{:?}", e)))?;
         let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+        let payment_type = PaymentType::OutboundPayment {
+            destination: invoice.payee_pub_key().cloned(),
+        };
         let payment_secret = Some(*invoice.payment_secret());
         Ok(PaymentInfo {
             payment_hash,
+            payment_type,
             preimage: None,
             secret: payment_secret,
             amt_msat: invoice.amount_milli_satoshis(),
@@ -153,9 +157,13 @@ impl LightningCoin {
             .pay_pubkey(destination, payment_preimage, amount_msat, final_cltv_expiry_delta)
             .map_to_mm(|e| SendPaymentError::PaymentError(format!("{:?}", e)))?;
         let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
+        let payment_type = PaymentType::OutboundPayment {
+            destination: Some(destination),
+        };
 
         Ok(PaymentInfo {
             payment_hash,
+            payment_type,
             preimage: Some(payment_preimage),
             secret: None,
             amt_msat: Some(amount_msat),
@@ -1008,7 +1016,7 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
     };
     ln_coin
         .persister
-        .add_or_update_payment_in_sql(payment_info.clone(), PaymentType::OutboundPayment)
+        .add_or_update_payment_in_sql(payment_info.clone())
         .await?;
     Ok(SendPaymentResponse {
         payment_hash: payment_info.payment_hash.0.into(),
@@ -1021,8 +1029,29 @@ pub struct ListPaymentsReq {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "type")]
+pub enum PaymentTypeForRPC {
+    #[serde(rename = "Outbound Payment")]
+    OutboundPayment { destination: Option<PublicKeyForRPC> },
+    #[serde(rename = "Inbound Payment")]
+    InboundPayment,
+}
+
+impl From<PaymentType> for PaymentTypeForRPC {
+    fn from(payment_type: PaymentType) -> Self {
+        match payment_type {
+            PaymentType::OutboundPayment { destination } => PaymentTypeForRPC::OutboundPayment {
+                destination: destination.map(PublicKeyForRPC),
+            },
+            PaymentType::InboundPayment => PaymentTypeForRPC::InboundPayment,
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct PaymentInfoForRPC {
     payment_hash: H256Json,
+    payment_type: PaymentTypeForRPC,
     amount_in_msat: Option<u64>,
     fee_paid_msat: Option<u64>,
     status: HTLCStatus,
@@ -1032,6 +1061,7 @@ impl From<PaymentInfo> for PaymentInfoForRPC {
     fn from(info: PaymentInfo) -> Self {
         PaymentInfoForRPC {
             payment_hash: info.payment_hash.0.into(),
+            payment_type: info.payment_type.into(),
             amount_in_msat: info.amt_msat,
             fee_paid_msat: info.fee_paid_msat,
             status: info.status,
@@ -1056,14 +1086,14 @@ pub async fn list_payments(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResu
         .get_inbound_payments()
         .await?
         .into_iter()
-        .map(|(info, _)| info.into())
+        .map(From::from)
         .collect();
     let outbound_payments = ln_coin
         .persister
         .get_outbound_payments()
         .await?
         .into_iter()
-        .map(|(info, _)| info.into())
+        .map(From::from)
         .collect();
 
     Ok(ListPaymentsResponse {
@@ -1080,7 +1110,6 @@ pub struct GetPaymentDetailsRequest {
 
 #[derive(Serialize)]
 pub struct GetPaymentDetailsResponse {
-    payment_type: PaymentType,
     payment_details: PaymentInfoForRPC,
 }
 
@@ -1094,13 +1123,12 @@ pub async fn get_payment_details(
         _ => return MmError::err(GetPaymentDetailsError::UnsupportedCoin(coin.ticker().to_string())),
     };
 
-    if let Some((payment_info, payment_type)) = ln_coin
+    if let Some(payment_info) = ln_coin
         .persister
         .get_payment_from_sql(PaymentHash(req.payment_hash.0))
         .await?
     {
         return Ok(GetPaymentDetailsResponse {
-            payment_type,
             payment_details: payment_info.into(),
         });
     }
