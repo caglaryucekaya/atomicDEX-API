@@ -261,6 +261,7 @@ impl LightningEventHandler {
                     payment_info.preimage = Some(payment_preimage);
                     payment_info.status = HTLCStatus::Succeeded;
                     payment_info.amt_msat = Some(amt);
+                    payment_info.last_updated = now_ms() / 1000;
                     if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
                         log::error!("{}", e);
                     }
@@ -276,6 +277,8 @@ impl LightningEventHandler {
                     amt_msat: Some(amt),
                     fee_paid_msat: None,
                     status,
+                    created_at: now_ms() / 1000,
+                    last_updated: now_ms() / 1000,
                 };
                 spawn(async move {
                     if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
@@ -306,6 +309,7 @@ impl LightningEventHandler {
                 payment_info.preimage = Some(payment_preimage);
                 payment_info.status = HTLCStatus::Succeeded;
                 payment_info.fee_paid_msat = fee_paid_msat;
+                payment_info.last_updated = now_ms() / 1000;
                 let amt_msat = payment_info.amt_msat;
                 if let Err(e) = persister
                     .add_or_update_payment_in_sql(payment_info)
@@ -397,6 +401,7 @@ impl LightningEventHandler {
                 .error_log_passthrough()
             {
                 payment_info.status = HTLCStatus::Failed;
+                payment_info.last_updated = now_ms() / 1000;
                 if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
                     log::error!("{}", e);
                 }

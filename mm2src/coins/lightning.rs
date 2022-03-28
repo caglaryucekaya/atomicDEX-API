@@ -25,7 +25,7 @@ use common::log::{LogOnError, LogState};
 use common::mm_ctx::MmArc;
 use common::mm_error::prelude::*;
 use common::mm_number::MmNumber;
-use common::{async_blocking, log};
+use common::{async_blocking, log, now_ms};
 use futures::{FutureExt, TryFutureExt};
 use futures01::Future;
 use keys::{AddressHashEnum, KeyPair};
@@ -142,6 +142,8 @@ impl LightningCoin {
             amt_msat: invoice.amount_milli_satoshis(),
             fee_paid_msat: None,
             status: HTLCStatus::Pending,
+            created_at: now_ms() / 1000,
+            last_updated: now_ms() / 1000,
         })
     }
 
@@ -175,6 +177,8 @@ impl LightningCoin {
             amt_msat: Some(amount_msat),
             fee_paid_msat: None,
             status: HTLCStatus::Pending,
+            created_at: now_ms() / 1000,
+            last_updated: now_ms() / 1000,
         })
     }
 }
@@ -972,6 +976,8 @@ pub async fn generate_invoice(
         amt_msat: req.amount_in_msat,
         fee_paid_msat: None,
         status: HTLCStatus::Pending,
+        created_at: now_ms() / 1000,
+        last_updated: now_ms() / 1000,
     };
     ln_coin.persister.add_or_update_payment_in_sql(payment_info).await?;
     Ok(GenerateInvoiceResponse {
@@ -1042,11 +1048,25 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
 }
 
 #[derive(Deserialize)]
-pub struct ListPaymentsReq {
-    pub coin: String,
+pub struct PaymentsFilter {
+    pub payment_type: Option<PaymentTypeForRPC>,
+    pub description: Option<String>,
+    pub status: Option<HTLCStatus>,
+    pub from_amount_msat: Option<u64>,
+    pub to_amount_msat: Option<u64>,
+    pub from_fee_paid_msat: Option<u64>,
+    pub to_fee_paid_msat: Option<u64>,
+    pub from_timestamp: Option<u64>,
+    pub to_timestamp: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize)]
+pub struct ListPaymentsReq {
+    pub coin: String,
+    pub filter: Option<PaymentsFilter>,
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum PaymentTypeForRPC {
     #[serde(rename = "Outbound Payment")]
@@ -1080,6 +1100,8 @@ pub struct PaymentInfoForRPC {
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_paid_msat: Option<u64>,
     status: HTLCStatus,
+    created_at: u64,
+    last_updated: u64,
 }
 
 impl From<PaymentInfo> for PaymentInfoForRPC {
@@ -1091,6 +1113,8 @@ impl From<PaymentInfo> for PaymentInfoForRPC {
             amount_in_msat: info.amt_msat,
             fee_paid_msat: info.fee_paid_msat,
             status: info.status,
+            created_at: info.created_at,
+            last_updated: info.last_updated,
         }
     }
 }
@@ -1101,7 +1125,7 @@ pub struct ListPaymentsResponse {
     pub outbound_payments: Vec<PaymentInfoForRPC>,
 }
 
-pub async fn list_payments(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResult<ListPaymentsResponse> {
+pub async fn list_payments_by_filter(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResult<ListPaymentsResponse> {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await?;
     let ln_coin = match coin {
         MmCoinEnum::LightningCoin(c) => c,

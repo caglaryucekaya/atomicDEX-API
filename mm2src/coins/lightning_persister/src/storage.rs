@@ -7,7 +7,7 @@ use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::ProbabilisticScorer;
 use parking_lot::Mutex as PaMutex;
 use secp256k1::PublicKey;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -88,7 +88,7 @@ impl SqlChannelDetails {
     }
 }
 
-#[derive(Clone, Debug, Display, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HTLCStatus {
     Pending,
@@ -125,6 +125,8 @@ pub struct PaymentInfo {
     pub amt_msat: Option<u64>,
     pub fee_paid_msat: Option<u64>,
     pub status: HTLCStatus,
+    pub created_at: u64,
+    pub last_updated: u64,
 }
 
 #[async_trait]

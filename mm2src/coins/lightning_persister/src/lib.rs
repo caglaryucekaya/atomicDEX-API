@@ -132,7 +132,9 @@ fn create_payments_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         amount_msat INTEGER,
         fee_paid_msat INTEGER,
         is_outbound INTEGER NOT NULL,
-        status VARCHAR(255) NOT NULL
+        status VARCHAR(255) NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_updated INTEGER NOT NULL
     );";
 
     Ok(sql)
@@ -155,7 +157,7 @@ fn insert_or_update_payment_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT OR REPLACE INTO ".to_owned()
         + &table_name
-        + " (payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);";
+        + " (payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, is_outbound, status, created_at, last_updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);";
 
     Ok(sql)
 }
@@ -174,7 +176,7 @@ fn select_payment_from_table_by_hash_sql(for_coin: &str) -> Result<String, SqlEr
     validate_table_name(&table_name)?;
 
     let sql =
-        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound, created_at, last_updated FROM "
             .to_owned()
             + &table_name
             + " WHERE payment_hash=?1;";
@@ -240,6 +242,8 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
         amt_msat: row.get::<_, u32>(5).ok().map(|v| v as u64),
         fee_paid_msat: row.get::<_, u32>(6).ok().map(|v| v as u64),
         status: HTLCStatus::from_str(&row.get::<_, String>(7)?)?,
+        created_at: row.get::<_, u32>(9)? as u64,
+        last_updated: row.get::<_, u32>(10)? as u64,
     };
     Ok(payment_info)
 }
@@ -296,7 +300,7 @@ fn get_outbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
     validate_table_name(&table_name)?;
 
     let sql =
-        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound, created_at, last_updated FROM "
             .to_owned()
             + &table_name
             + " WHERE is_outbound = 1;";
@@ -309,7 +313,7 @@ fn get_inbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
     validate_table_name(&table_name)?;
 
     let sql =
-        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound FROM "
+        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound, created_at, last_updated FROM "
             .to_owned()
             + &table_name
             + " WHERE is_outbound = 0;";
@@ -764,6 +768,8 @@ impl SqlStorage for LightningPersister {
         let amount_msat = info.amt_msat.map(|a| a as u32);
         let fee_paid_msat = info.fee_paid_msat.map(|f| f as u32);
         let status = info.status.to_string();
+        let created_at = info.created_at as u32;
+        let last_updated = info.last_updated as u32;
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
@@ -777,6 +783,8 @@ impl SqlStorage for LightningPersister {
                 &fee_paid_msat as &dyn ToSql,
                 &is_outbound as &dyn ToSql,
                 &status as &dyn ToSql,
+                &created_at as &dyn ToSql,
+                &last_updated as &dyn ToSql,
             ];
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
@@ -956,7 +964,7 @@ mod tests {
     use bitcoin::blockdata::block::{Block, BlockHeader};
     use bitcoin::hashes::hex::FromHex;
     use bitcoin::Txid;
-    use common::block_on;
+    use common::{block_on, now_ms};
     use db_common::sqlite::rusqlite::Connection;
     use lightning::chain::chainmonitor::Persist;
     use lightning::chain::transaction::OutPoint;
@@ -1315,6 +1323,8 @@ mod tests {
             amt_msat: Some(2000),
             fee_paid_msat: Some(100),
             status: HTLCStatus::Failed,
+            created_at: now_ms() / 1000,
+            last_updated: now_ms() / 1000,
         };
         block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone())).unwrap();
 
@@ -1332,6 +1342,7 @@ mod tests {
         expected_payment_info.secret = None;
         expected_payment_info.amt_msat = None;
         expected_payment_info.status = HTLCStatus::Succeeded;
+        expected_payment_info.last_updated = now_ms() / 1000;
         block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone())).unwrap();
 
         let actual_payment_info = block_on(persister.get_payment_from_sql(PaymentHash([1; 32])))
