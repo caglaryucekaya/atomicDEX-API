@@ -13,18 +13,19 @@ extern crate lightning;
 extern crate secp256k1;
 extern crate serde_json;
 
-use crate::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMap, NodesAddressesMapShared, PaymentInfo,
-                     PaymentType, Scorer, SqlChannelDetails, SqlStorage};
+use crate::storage::{FileSystemStorage, GetPaymentsResult, HTLCStatus, NodesAddressesMap, NodesAddressesMapShared,
+                     PaymentInfo, PaymentType, PaymentsFilter, Scorer, SqlChannelDetails, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::Network;
-use common::async_blocking;
 use common::fs::check_dir_operations;
+use common::{async_blocking, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::{Error as SqlError, Row, ToSql, NO_PARAMS};
-use db_common::sqlite::{query_single_row, string_from_row, validate_table_name, SqliteConnShared,
+use db_common::sqlite::sql_builder::SqlBuilder;
+use db_common::sqlite::{offset_by_id, query_single_row, string_from_row, validate_table_name, SqliteConnShared,
                         CHECK_TABLE_EXISTS_SQL};
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
@@ -295,30 +296,83 @@ fn get_closed_channels_sql(for_coin: &str) -> Result<String, SqlError> {
     Ok(sql)
 }
 
-fn get_outbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
+fn get_payments_builder_preimage(for_coin: &str) -> Result<SqlBuilder, SqlError> {
     let table_name = payments_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql =
-        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound, created_at, last_updated FROM "
-            .to_owned()
-            + &table_name
-            + " WHERE is_outbound = 1;";
-
-    Ok(sql)
+    Ok(SqlBuilder::select_from(table_name))
 }
 
-fn get_inbound_payments_sql(for_coin: &str) -> Result<String, SqlError> {
-    let table_name = payments_history_table(for_coin);
-    validate_table_name(&table_name)?;
+fn finalize_get_payments_sql_builder(sql_builder: &mut SqlBuilder, offset: usize, limit: usize) {
+    sql_builder
+        .field("payment_hash")
+        .field("destination")
+        .field("description")
+        .field("preimage")
+        .field("secret")
+        .field("amount_msat")
+        .field("fee_paid_msat")
+        .field("status")
+        .field("is_outbound")
+        .field("created_at")
+        .field("last_updated");
+    sql_builder.offset(offset);
+    sql_builder.limit(limit);
+    sql_builder.order_desc("last_updated");
+}
 
-    let sql =
-        "SELECT payment_hash, destination, description, preimage, secret, amount_msat, fee_paid_msat, status, is_outbound, created_at, last_updated FROM "
-            .to_owned()
-            + &table_name
-            + " WHERE is_outbound = 0;";
+fn apply_get_payments_filter(builder: &mut SqlBuilder, params: &mut Vec<(&str, String)>, filter: PaymentsFilter) {
+    if let Some(payment_type) = filter.payment_type {
+        let (is_outbound, destination) = match payment_type {
+            PaymentType::OutboundPayment { destination } => (true as i32, destination.map(|d| d.to_string())),
+            PaymentType::InboundPayment => (false as i32, None),
+        };
+        if let Some(dest) = destination {
+            builder.and_where(format!("destination LIKE '%{}%'", dest));
+        }
 
-    Ok(sql)
+        builder.and_where("is_outbound = :is_outbound");
+        params.push((":is_outbound", is_outbound.to_string()));
+    }
+
+    if let Some(description) = filter.description {
+        builder.and_where(format!("description LIKE '%{}%'", description));
+    }
+
+    if let Some(status) = filter.status {
+        builder.and_where("status = :status");
+        params.push((":status", status.to_string()));
+    }
+
+    if let Some(from_amount) = filter.from_amount_msat {
+        builder.and_where("amount_msat >= :from_amount");
+        params.push((":from_amount", from_amount.to_string()));
+    }
+
+    if let Some(to_amount) = filter.to_amount_msat {
+        builder.and_where("amount_msat <= :to_amount");
+        params.push((":to_amount", to_amount.to_string()));
+    }
+
+    if let Some(from_fee) = filter.from_fee_paid_msat {
+        builder.and_where("fee_paid_msat >= :from_fee");
+        params.push((":from_fee", from_fee.to_string()));
+    }
+
+    if let Some(to_fee) = filter.to_fee_paid_msat {
+        builder.and_where("fee_paid_msat <= :to_fee");
+        params.push((":to_fee", to_fee.to_string()));
+    }
+
+    if let Some(from_time) = filter.from_timestamp {
+        builder.and_where("created_at >= :from_time");
+        params.push((":from_time", from_time.to_string()));
+    }
+
+    if let Some(to_time) = filter.to_timestamp {
+        builder.and_where("created_at <= :to_time");
+        params.push((":to_time", to_time.to_string()));
+    }
 }
 
 fn update_claiming_tx_sql(for_coin: &str) -> Result<String, SqlError> {
@@ -905,29 +959,67 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_outbound_payments(&self) -> Result<Vec<PaymentInfo>, Self::Error> {
-        let sql = get_outbound_payments_sql(self.storage_ticker.as_str())?;
+    async fn get_payments_by_filter(
+        &self,
+        filter: Option<PaymentsFilter>,
+        paging: PagingOptionsEnum<PaymentHash>,
+        limit: usize,
+    ) -> Result<GetPaymentsResult, Self::Error> {
+        let mut sql_builder = get_payments_builder_preimage(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
 
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query(NO_PARAMS)?;
-            let result = rows.mapped(payment_info_from_row).collect::<Result<_, _>>()?;
-            Ok(result)
-        })
-        .await
-    }
 
-    async fn get_inbound_payments(&self) -> Result<Vec<PaymentInfo>, Self::Error> {
-        let sql = get_inbound_payments_sql(self.storage_ticker.as_str())?;
-        let sqlite_connection = self.sqlite_connection.clone();
+            let mut total_builder = sql_builder.clone();
+            total_builder.count("id");
+            let total_sql = total_builder.sql().expect("valid sql");
+            let total: isize = conn.query_row(&total_sql, NO_PARAMS, |row| row.get(0))?;
+            let total = total.try_into().expect("count should be always above zero");
 
-        async_blocking(move || {
-            let conn = sqlite_connection.lock().unwrap();
+            let offset = match paging {
+                PagingOptionsEnum::PageNumber(page) => (page.get() - 1) * limit,
+                PagingOptionsEnum::FromId(hash) => {
+                    let hash_str = hex::encode(hash.0);
+                    let params = [&hash_str];
+                    let maybe_offset = offset_by_id(
+                        &conn,
+                        &sql_builder,
+                        params,
+                        "payment_hash",
+                        "last_updated DESC",
+                        "payment_hash = ?1",
+                    )?;
+                    match maybe_offset {
+                        Some(offset) => offset,
+                        None => {
+                            return Ok(GetPaymentsResult {
+                                payments: vec![],
+                                skipped: 0,
+                                total,
+                            })
+                        },
+                    }
+                },
+            };
+
+            let mut params = vec![];
+            if let Some(f) = filter {
+                apply_get_payments_filter(&mut sql_builder, &mut params, f);
+            }
+            let params_as_trait: Vec<_> = params.iter().map(|(key, value)| (*key, value as &dyn ToSql)).collect();
+            finalize_get_payments_sql_builder(&mut sql_builder, offset, limit);
+
+            let sql = sql_builder.sql().expect("valid sql");
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query(NO_PARAMS)?;
-            let result = rows.mapped(payment_info_from_row).collect::<Result<_, _>>()?;
+            let payments = stmt
+                .query_map_named(params_as_trait.as_slice(), payment_info_from_row)?
+                .collect::<Result<_, _>>()?;
+            let result = GetPaymentsResult {
+                payments,
+                skipped: offset,
+                total,
+            };
             Ok(result)
         })
         .await
@@ -974,7 +1066,11 @@ mod tests {
     use lightning::util::events::{ClosureReason, MessageSendEventsProvider};
     use lightning::util::test_utils;
     use lightning::{check_added_monitors, check_closed_broadcast, check_closed_event};
+    use rand::distributions::Alphanumeric;
+    use rand::{Rng, RngCore};
+    use secp256k1::{Secp256k1, SecretKey};
     use std::fs;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -987,6 +1083,57 @@ mod tests {
                 _ => {},
             }
         }
+    }
+
+    fn generate_random_payments(num: u64) -> Vec<PaymentInfo> {
+        let mut rng = rand::thread_rng();
+        let mut payments = vec![];
+        let s = Secp256k1::new();
+        let mut bytes = [0; 32];
+        for _ in 0..num {
+            let payment_type = if let 0 = rng.gen::<u8>() % 2 {
+                PaymentType::InboundPayment
+            } else {
+                rng.fill_bytes(&mut bytes);
+                let secret = SecretKey::from_slice(&bytes).unwrap();
+                let pubkey = PublicKey::from_secret_key(&s, &secret);
+                PaymentType::OutboundPayment {
+                    destination: Some(pubkey),
+                }
+            };
+            let status_rng: u8 = rng.gen();
+            let status = if status_rng % 3 == 0 {
+                HTLCStatus::Succeeded
+            } else if status_rng % 3 == 1 {
+                HTLCStatus::Pending
+            } else {
+                HTLCStatus::Failed
+            };
+            let description: String = rng.sample_iter(&Alphanumeric).take(30).map(char::from).collect();
+            let info = PaymentInfo {
+                payment_hash: {
+                    rng.fill_bytes(&mut bytes);
+                    PaymentHash(bytes)
+                },
+                payment_type,
+                description: Some(description),
+                preimage: {
+                    rng.fill_bytes(&mut bytes);
+                    Some(PaymentPreimage(bytes))
+                },
+                secret: {
+                    rng.fill_bytes(&mut bytes);
+                    Some(PaymentSecret(bytes))
+                },
+                amt_msat: Some(rng.gen::<u32>() as u64),
+                fee_paid_msat: Some(rng.gen::<u32>() as u64),
+                status,
+                created_at: rng.gen::<u32>() as u64,
+                last_updated: rng.gen::<u32>() as u64,
+            };
+            payments.push(info);
+        }
+        payments
     }
 
     // Integration-test the LightningPersister. Test relaying a few payments
@@ -1349,11 +1496,129 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(expected_payment_info, actual_payment_info);
+    }
 
-        // Update the first payment to outbound
-        expected_payment_info.payment_hash = PaymentHash([0; 32]);
-        block_on(persister.add_or_update_payment_in_sql(expected_payment_info.clone())).unwrap();
-        let outbound_payments = block_on(persister.get_outbound_payments()).unwrap();
-        assert_eq!(outbound_payments.len(), 2);
+    #[test]
+    fn test_get_payments_by_filter() {
+        let persister = LightningPersister::new(
+            "test_get_payments_by_filter".into(),
+            PathBuf::from("test_filesystem_persister"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
+
+        block_on(persister.init_sql()).unwrap();
+
+        let mut payments = generate_random_payments(100);
+
+        for payment in payments.clone() {
+            block_on(persister.add_or_update_payment_in_sql(payment)).unwrap();
+        }
+
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap());
+        let limit = 4;
+
+        let result = block_on(persister.get_payments_by_filter(None, paging, limit)).unwrap();
+
+        payments.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+        let expected_payments = &payments[..4].to_vec();
+        let actual_payments = &result.payments;
+
+        assert_eq!(0, result.skipped);
+        assert_eq!(100, result.total);
+        assert_eq!(expected_payments, actual_payments);
+
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(2).unwrap());
+        let limit = 5;
+
+        let result = block_on(persister.get_payments_by_filter(None, paging, limit)).unwrap();
+
+        let expected_payments = &payments[5..10].to_vec();
+        let actual_payments = &result.payments;
+
+        assert_eq!(5, result.skipped);
+        assert_eq!(100, result.total);
+        assert_eq!(expected_payments, actual_payments);
+
+        let from_payment_hash = payments[20].payment_hash;
+        let paging = PagingOptionsEnum::FromId(from_payment_hash);
+        let limit = 3;
+
+        let result = block_on(persister.get_payments_by_filter(None, paging, limit)).unwrap();
+
+        let expected_payments = &payments[21..24].to_vec();
+        let actual_payments = &result.payments;
+
+        assert_eq!(expected_payments, actual_payments);
+
+        let mut filter = PaymentsFilter {
+            payment_type: Some(PaymentType::InboundPayment),
+            description: None,
+            status: None,
+            from_amount_msat: None,
+            to_amount_msat: None,
+            from_fee_paid_msat: None,
+            to_fee_paid_msat: None,
+            from_timestamp: None,
+            to_timestamp: None,
+        };
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap());
+        let limit = 10;
+
+        let result = block_on(persister.get_payments_by_filter(Some(filter.clone()), paging.clone(), limit)).unwrap();
+        let expected_payments_vec: Vec<PaymentInfo> = payments
+            .iter()
+            .map(|p| p.clone())
+            .filter(|p| p.payment_type == PaymentType::InboundPayment)
+            .collect();
+        let expected_payments = if expected_payments_vec.len() > 10 {
+            expected_payments_vec[..10].to_vec()
+        } else {
+            expected_payments_vec.clone()
+        };
+        let actual_payments = result.payments;
+
+        assert_eq!(expected_payments, actual_payments);
+
+        filter.status = Some(HTLCStatus::Succeeded);
+        let result = block_on(persister.get_payments_by_filter(Some(filter.clone()), paging.clone(), limit)).unwrap();
+        let expected_payments_vec: Vec<PaymentInfo> = expected_payments_vec
+            .iter()
+            .map(|p| p.clone())
+            .filter(|p| p.status == HTLCStatus::Succeeded)
+            .collect();
+        let expected_payments = if expected_payments_vec.len() > 10 {
+            expected_payments_vec[..10].to_vec()
+        } else {
+            expected_payments_vec
+        };
+        let actual_payments = result.payments;
+
+        assert_eq!(expected_payments, actual_payments);
+
+        let description = payments[42].description.as_ref().unwrap();
+        let substr = &description[5..10];
+        filter.payment_type = None;
+        filter.status = None;
+        filter.description = Some(substr.to_string());
+        let result = block_on(persister.get_payments_by_filter(Some(filter), paging, limit)).unwrap();
+        let expected_payments_vec: Vec<PaymentInfo> = payments
+            .iter()
+            .map(|p| p.clone())
+            .filter(|p| {
+                if let Some(desc) = &p.description {
+                    return desc.contains(&substr);
+                }
+                return false;
+            })
+            .collect();
+        let expected_payments = if expected_payments_vec.len() > 10 {
+            expected_payments_vec[..10].to_vec()
+        } else {
+            expected_payments_vec.clone()
+        };
+        let actual_payments = result.payments;
+
+        assert_eq!(expected_payments, actual_payments);
     }
 }

@@ -25,7 +25,7 @@ use common::log::{LogOnError, LogState};
 use common::mm_ctx::MmArc;
 use common::mm_error::prelude::*;
 use common::mm_number::MmNumber;
-use common::{async_blocking, log, now_ms};
+use common::{async_blocking, calc_total_pages, log, now_ms, ten, PagingOptionsEnum};
 use futures::{FutureExt, TryFutureExt};
 use futures01::Future;
 use keys::{AddressHashEnum, KeyPair};
@@ -41,7 +41,7 @@ use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::{Invoice, InvoiceDescription};
 use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo, PaymentType,
-                                   Scorer, SqlChannelDetails, SqlStorage};
+                                   PaymentsFilter, Scorer, SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -1048,7 +1048,7 @@ pub async fn send_payment(ctx: MmArc, req: SendPaymentReq) -> SendPaymentResult<
 }
 
 #[derive(Deserialize)]
-pub struct PaymentsFilter {
+pub struct PaymentsFilterForRPC {
     pub payment_type: Option<PaymentTypeForRPC>,
     pub description: Option<String>,
     pub status: Option<HTLCStatus>,
@@ -1060,10 +1060,30 @@ pub struct PaymentsFilter {
     pub to_timestamp: Option<u64>,
 }
 
+impl From<PaymentsFilterForRPC> for PaymentsFilter {
+    fn from(filter: PaymentsFilterForRPC) -> Self {
+        PaymentsFilter {
+            payment_type: filter.payment_type.map(From::from),
+            description: filter.description,
+            status: filter.status,
+            from_amount_msat: filter.from_amount_msat,
+            to_amount_msat: filter.to_amount_msat,
+            from_fee_paid_msat: filter.from_fee_paid_msat,
+            to_fee_paid_msat: filter.to_fee_paid_msat,
+            from_timestamp: filter.from_timestamp,
+            to_timestamp: filter.to_timestamp,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ListPaymentsReq {
     pub coin: String,
-    pub filter: Option<PaymentsFilter>,
+    pub filter: Option<PaymentsFilterForRPC>,
+    #[serde(default = "ten")]
+    limit: usize,
+    #[serde(default)]
+    paging_options: PagingOptionsEnum<H256Json>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1085,6 +1105,17 @@ impl From<PaymentType> for PaymentTypeForRPC {
                 destination: destination.map(PublicKeyForRPC),
             },
             PaymentType::InboundPayment => PaymentTypeForRPC::InboundPayment,
+        }
+    }
+}
+
+impl From<PaymentTypeForRPC> for PaymentType {
+    fn from(payment_type: PaymentTypeForRPC) -> Self {
+        match payment_type {
+            PaymentTypeForRPC::OutboundPayment { destination } => PaymentType::OutboundPayment {
+                destination: destination.map(From::from),
+            },
+            PaymentTypeForRPC::InboundPayment => PaymentType::InboundPayment,
         }
     }
 }
@@ -1121,8 +1152,12 @@ impl From<PaymentInfo> for PaymentInfoForRPC {
 
 #[derive(Serialize)]
 pub struct ListPaymentsResponse {
-    pub inbound_payments: Vec<PaymentInfoForRPC>,
-    pub outbound_payments: Vec<PaymentInfoForRPC>,
+    payments: Vec<PaymentInfoForRPC>,
+    limit: usize,
+    skipped: usize,
+    total: usize,
+    total_pages: usize,
+    paging_options: PagingOptionsEnum<H256Json>,
 }
 
 pub async fn list_payments_by_filter(ctx: MmArc, req: ListPaymentsReq) -> ListPaymentsResult<ListPaymentsResponse> {
@@ -1131,24 +1166,22 @@ pub async fn list_payments_by_filter(ctx: MmArc, req: ListPaymentsReq) -> ListPa
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(ListPaymentsError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let inbound_payments = ln_coin
+    let get_payments_res = ln_coin
         .persister
-        .get_inbound_payments()
-        .await?
-        .into_iter()
-        .map(From::from)
-        .collect();
-    let outbound_payments = ln_coin
-        .persister
-        .get_outbound_payments()
-        .await?
-        .into_iter()
-        .map(From::from)
-        .collect();
+        .get_payments_by_filter(
+            req.filter.map(From::from),
+            req.paging_options.clone().map(|h| PaymentHash(h.0)),
+            req.limit,
+        )
+        .await?;
 
     Ok(ListPaymentsResponse {
-        inbound_payments,
-        outbound_payments,
+        payments: get_payments_res.payments.into_iter().map(From::from).collect(),
+        limit: req.limit,
+        skipped: get_payments_res.skipped,
+        total: get_payments_res.total,
+        total_pages: calc_total_pages(get_payments_res.total, req.limit),
+        paging_options: req.paging_options,
     })
 }
 

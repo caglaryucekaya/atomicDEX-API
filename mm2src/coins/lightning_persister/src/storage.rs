@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::Network;
+use common::PagingOptionsEnum;
 use db_common::sqlite::rusqlite::types::FromSqlError;
 use derive_more::Display;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
@@ -129,6 +130,25 @@ pub struct PaymentInfo {
     pub last_updated: u64,
 }
 
+#[derive(Clone)]
+pub struct PaymentsFilter {
+    pub payment_type: Option<PaymentType>,
+    pub description: Option<String>,
+    pub status: Option<HTLCStatus>,
+    pub from_amount_msat: Option<u64>,
+    pub to_amount_msat: Option<u64>,
+    pub from_fee_paid_msat: Option<u64>,
+    pub to_fee_paid_msat: Option<u64>,
+    pub from_timestamp: Option<u64>,
+    pub to_timestamp: Option<u64>,
+}
+
+pub struct GetPaymentsResult {
+    pub payments: Vec<PaymentInfo>,
+    pub skipped: usize,
+    pub total: usize,
+}
+
 #[async_trait]
 pub trait SqlStorage {
     type Error;
@@ -162,9 +182,12 @@ pub trait SqlStorage {
 
     async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error>;
 
-    async fn get_outbound_payments(&self) -> Result<Vec<PaymentInfo>, Self::Error>;
-
-    async fn get_inbound_payments(&self) -> Result<Vec<PaymentInfo>, Self::Error>;
+    async fn get_payments_by_filter(
+        &self,
+        filter: Option<PaymentsFilter>,
+        paging: PagingOptionsEnum<PaymentHash>,
+        limit: usize,
+    ) -> Result<GetPaymentsResult, Self::Error>;
 
     async fn add_claiming_tx_to_sql(
         &self,

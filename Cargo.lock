@@ -3073,6 +3073,7 @@ dependencies = [
  "libc",
  "lightning",
  "parking_lot 0.12.0",
+ "rand 0.7.3",
  "secp256k1",
  "serde",
  "serde_json",
