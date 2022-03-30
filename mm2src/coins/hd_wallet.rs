@@ -177,9 +177,7 @@ impl From<AccountUpdatingError> for BalanceError {
 #[derive(Clone, Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum HDWalletRpcError {
-    /*                                              */
     /* ----------- Trezor device errors ----------- */
-    /*                                              */
     #[display(fmt = "Trezor device disconnected")]
     TrezorDisconnected,
     #[display(fmt = "Trezor internal error: {}", _0)]
@@ -192,9 +190,7 @@ pub enum HDWalletRpcError {
         fmt = "Coin doesn't support Trezor hardware wallet. Please consider adding the 'trezor_coin' field to the coins config"
     )]
     CoinDoesntSupportTrezor,
-    /*                                              */
     /* ----------- HD Wallet RPC error ------------ */
-    /*                                              */
     #[display(fmt = "Hardware Wallet context is not initialized")]
     HwContextNotInitialized,
     #[display(fmt = "No such coin {}", coin)]

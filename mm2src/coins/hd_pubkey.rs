@@ -138,7 +138,7 @@ where
     Task: RpcTask,
     Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError> + Send,
 {
-    pub async fn new(
+    pub fn new(
         ctx: &MmArc,
         task_handle: &'task RpcTaskHandle<Task>,
         statuses: HwConnectStatuses<Task::InProgressStatus, Task::AwaitingStatus>,
@@ -146,7 +146,6 @@ where
         let crypto_ctx = CryptoCtx::from_ctx(ctx)?;
         let hw_ctx = crypto_ctx
             .hw_ctx()
-            .await
             .or_mm_err(|| HDExtractPubkeyError::HwContextNotInitialized)?;
         Ok(RpcTaskXPubExtractor::Trezor {
             hw_ctx,
@@ -156,12 +155,12 @@ where
     }
 
     /// Constructs an Xpub extractor without checking if the MarketMaker is initialized with a hardware wallet.
-    pub async fn new_unchecked(
+    pub fn new_unchecked(
         ctx: &MmArc,
         task_handle: &'task RpcTaskHandle<Task>,
         statuses: HwConnectStatuses<Task::InProgressStatus, Task::AwaitingStatus>,
     ) -> XPubExtractorUnchecked<RpcTaskXPubExtractor<'task, Task>> {
-        XPubExtractorUnchecked(Self::new(ctx, task_handle, statuses).await)
+        XPubExtractorUnchecked(Self::new(ctx, task_handle, statuses))
     }
 
     async fn extract_utxo_xpub_from_trezor(

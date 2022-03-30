@@ -25,16 +25,14 @@ type InitHwTaskHandle = RpcTaskHandle<InitHwTask>;
 #[derive(Clone, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum InitHwError {
-    /*                                              */
     /* ----------- Trezor device errors ----------- */
-    /*                                              */
     #[display(fmt = "Trezor internal error: {}", _0)]
     TrezorInternal(String),
     #[display(fmt = "No Trezor device available")]
     NoTrezorDeviceAvailable,
-    /*                                              */
     /* ---------------- RPC error ----------------- */
-    /*                                              */
+    #[display(fmt = "Hardware Wallet context is initializing already")]
+    HwContextInitializingAlready,
     #[display(fmt = "Hardware Wallet context is initialized already")]
     HwContextInitializedAlready,
     #[display(fmt = "RPC timed out {:?}", _0)]
@@ -50,6 +48,7 @@ impl From<CryptoInitError> for InitHwError {
 impl From<HwCtxInitError<RpcTaskError>> for InitHwError {
     fn from(e: HwCtxInitError<RpcTaskError>) -> Self {
         match e {
+            HwCtxInitError::InitializingAlready => InitHwError::HwContextInitializingAlready,
             HwCtxInitError::InitializedAlready => InitHwError::HwContextInitializedAlready,
             HwCtxInitError::HwError(hw_error) => InitHwError::from(hw_error),
             HwCtxInitError::ProcessorError(rpc) => InitHwError::from(rpc),
@@ -81,7 +80,9 @@ impl From<RpcTaskError> for InitHwError {
 impl HttpStatusCode for InitHwError {
     fn status_code(&self) -> StatusCode {
         match self {
-            InitHwError::HwContextInitializedAlready => StatusCode::BAD_REQUEST,
+            InitHwError::HwContextInitializingAlready | InitHwError::HwContextInitializedAlready => {
+                StatusCode::BAD_REQUEST
+            },
             InitHwError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             InitHwError::TrezorInternal(_) | InitHwError::NoTrezorDeviceAvailable | InitHwError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR

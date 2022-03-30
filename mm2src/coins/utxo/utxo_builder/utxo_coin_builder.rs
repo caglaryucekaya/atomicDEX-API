@@ -188,7 +188,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         if !self.supports_trezor(&conf) {
             return MmError::err(UtxoCoinBuildError::CoinDoesntSupportTrezor);
         }
-        self.check_if_trezor_is_initialized().await?;
+        self.check_if_trezor_is_initialized()?;
 
         // For now, use a default script pubkey.
         // TODO change the type of `recently_spent_outpoints` to `AsyncMutex<HashMap<Bytes, RecentlySpentOutPoints>>`
@@ -261,11 +261,10 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
 
     fn supports_trezor(&self, conf: &UtxoCoinConf) -> bool { conf.trezor_coin.is_some() }
 
-    async fn check_if_trezor_is_initialized(&self) -> UtxoCoinBuildResult<()> {
+    fn check_if_trezor_is_initialized(&self) -> UtxoCoinBuildResult<()> {
         let crypto_ctx = CryptoCtx::from_ctx(self.ctx())?;
         let hw_ctx = crypto_ctx
             .hw_ctx()
-            .await
             .or_mm_err(|| UtxoCoinBuildError::HwContextNotInitialized)?;
         match hw_ctx.hw_wallet_type() {
             HwWalletType::Trezor => Ok(()),

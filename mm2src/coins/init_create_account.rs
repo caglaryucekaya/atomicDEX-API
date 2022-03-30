@@ -93,7 +93,7 @@ impl RpcTask for InitCreateAccountTask {
                 on_pin_request: CreateAccountAwaitingStatus::WaitForTrezorPin,
                 on_ready: CreateAccountInProgressStatus::RequestingAccountBalance,
             };
-            let xpub_extractor = CreateAccountXPubExtractor::new(ctx, task_handle, hw_statuses).await?;
+            let xpub_extractor = CreateAccountXPubExtractor::new(ctx, task_handle, hw_statuses)?;
             coin.init_create_account_rpc(params, &xpub_extractor).await
         }
 

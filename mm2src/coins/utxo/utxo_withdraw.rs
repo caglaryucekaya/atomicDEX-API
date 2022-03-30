@@ -376,7 +376,6 @@ impl<'a, Coin> InitUtxoWithdraw<'a, Coin> {
         let crypto_ctx = CryptoCtx::from_ctx(&self.ctx)?;
         let hw_ctx = crypto_ctx
             .hw_ctx()
-            .await
             .or_mm_err(|| WithdrawError::NoTrezorDeviceAvailable)?;
 
         let trezor_connect_processor = TrezorRpcTaskConnectProcessor::new(self.task_handle, HwConnectStatuses {

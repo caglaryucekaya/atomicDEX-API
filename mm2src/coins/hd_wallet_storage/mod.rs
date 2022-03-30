@@ -226,7 +226,6 @@ impl HDWalletCoinStorage {
         let crypto_ctx = CryptoCtx::from_ctx(ctx)?;
         let hd_wallet_rmd160 = crypto_ctx
             .hd_wallet_rmd160()
-            .await
             .or_mm_err(|| HDWalletStorageError::HDWalletUnavailable)?;
         Ok(HDWalletCoinStorage {
             coin,
