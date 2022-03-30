@@ -249,6 +249,31 @@ pub struct OrderbookV2Response {
     total_bids_rel_vol: MmNumberMultiRepr,
 }
 
+enum GetTradeableCoinConfErr {
+    CoinConfigNotFound(String),
+    CoinIsWalletOnly(String),
+}
+
+fn get_tradeable_coin_conf(ctx: &MmArc, ticker: &str) -> MmResult<Json, GetTradeableCoinConfErr> {
+    let conf = coin_conf(ctx, ticker);
+    if conf.is_null() {
+        return MmError::err(GetTradeableCoinConfErr::CoinConfigNotFound(ticker.to_owned()));
+    }
+    if is_wallet_only_conf(&conf) {
+        return MmError::err(GetTradeableCoinConfErr::CoinIsWalletOnly(ticker.to_owned()));
+    }
+    Ok(conf)
+}
+
+impl From<GetTradeableCoinConfErr> for OrderbookRpcError {
+    fn from(err: GetTradeableCoinConfErr) -> Self {
+        match err {
+            GetTradeableCoinConfErr::CoinConfigNotFound(ticker) => OrderbookRpcError::CoinConfigNotFound(ticker),
+            GetTradeableCoinConfErr::CoinIsWalletOnly(ticker) => OrderbookRpcError::CoinIsWalletOnly(ticker),
+        }
+    }
+}
+
 pub async fn orderbook_rpc_v2(
     ctx: MmArc,
     req: OrderbookReq,
@@ -256,20 +281,10 @@ pub async fn orderbook_rpc_v2(
     if req.base == req.rel {
         return MmError::err(OrderbookRpcError::BaseRelSame);
     }
-    let base_coin_conf = coin_conf(&ctx, &req.base);
-    if base_coin_conf.is_null() {
-        return MmError::err(OrderbookRpcError::CoinConfigNotFound(req.base));
-    }
-    if is_wallet_only_conf(&base_coin_conf) {
-        return MmError::err(OrderbookRpcError::CoinIsWalletOnly(req.base));
-    }
-    let rel_coin_conf = coin_conf(&ctx, &req.rel);
-    if rel_coin_conf.is_null() {
-        return MmError::err(OrderbookRpcError::CoinConfigNotFound(req.rel));
-    }
-    if is_wallet_only_conf(&rel_coin_conf) {
-        return MmError::err(OrderbookRpcError::CoinIsWalletOnly(req.rel));
-    }
+    let base_coin_conf = get_tradeable_coin_conf(&ctx, &req.base)?;
+
+    let rel_coin_conf = get_tradeable_coin_conf(&ctx, &req.rel)?;
+
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("ctx is available");
     let base_ticker = ordermatch_ctx.orderbook_ticker_bypass(&req.base);
     let rel_ticker = ordermatch_ctx.orderbook_ticker_bypass(&req.rel);
