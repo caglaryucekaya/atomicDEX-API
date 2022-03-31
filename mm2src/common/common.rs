@@ -1321,7 +1321,7 @@ pub fn round_to(bd: &BigDecimal, places: u8) -> String {
 
         if pos < dot {
             //println! ("{}, pos < dot, stopping at pos {}", bds, pos);
-            let mut integer: i64 = (&bds[0..=pos]).parse().unwrap();
+            let mut integer: i64 = (bds[0..=pos]).parse().unwrap();
             if prev_digit > 5 {
                 if bda[0] == b'-' {
                     integer = integer.checked_sub(1).unwrap()
@@ -1385,6 +1385,10 @@ fn test_round_to() {
 pub const fn true_f() -> bool { true }
 
 pub const fn ten() -> usize { 10 }
+
+pub const fn ten_f64() -> f64 { 10. }
+
+pub const fn one_hundred() -> usize { 100 }
 
 pub fn one() -> NonZeroUsize { NonZeroUsize::new(1).unwrap() }
 
