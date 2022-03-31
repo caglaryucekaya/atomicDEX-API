@@ -1454,6 +1454,7 @@ pub enum MmCoinEnum {
     ZCoin(ZCoin),
     Bch(BchCoin),
     SlpToken(SlpToken),
+    #[cfg(not(target_arch = "wasm32"))]
     SolanaCoin(SolanaCoin),
     #[cfg(not(target_arch = "wasm32"))]
     SplToken(SplToken),
