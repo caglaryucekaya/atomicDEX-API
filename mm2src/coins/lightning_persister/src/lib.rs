@@ -13,8 +13,9 @@ extern crate lightning;
 extern crate secp256k1;
 extern crate serde_json;
 
-use crate::storage::{FileSystemStorage, GetPaymentsResult, HTLCStatus, NodesAddressesMap, NodesAddressesMapShared,
-                     PaymentInfo, PaymentType, PaymentsFilter, Scorer, SqlChannelDetails, SqlStorage};
+use crate::storage::{ChannelType, ChannelVisibility, ClosedChannelsFilter, FileSystemStorage, GetClosedChannelsResult,
+                     GetPaymentsResult, HTLCStatus, NodesAddressesMap, NodesAddressesMapShared, PaymentInfo,
+                     PaymentType, PaymentsFilter, Scorer, SqlChannelDetails, SqlStorage};
 use crate::util::DiskWriteable;
 use async_trait::async_trait;
 use bitcoin::blockdata::constants::genesis_block;
@@ -22,7 +23,7 @@ use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::Network;
 use common::fs::check_dir_operations;
-use common::{async_blocking, PagingOptionsEnum};
+use common::{async_blocking, now_ms, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::{Error as SqlError, Row, ToSql, NO_PARAMS};
 use db_common::sqlite::sql_builder::SqlBuilder;
 use db_common::sqlite::{offset_by_id, query_single_row, string_from_row, validate_table_name, SqliteConnShared,
@@ -111,7 +112,9 @@ fn create_channels_history_table_sql(for_coin: &str) -> Result<String, SqlError>
         claimed_balance REAL,
         is_outbound INTEGER NOT NULL,
         is_public INTEGER NOT NULL,
-        is_closed INTEGER NOT NULL
+        is_closed INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_updated INTEGER NOT NULL
     );";
 
     Ok(sql)
@@ -147,7 +150,7 @@ fn insert_channel_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "INSERT INTO ".to_owned()
         + &table_name
-        + " (rpc_id, channel_id, counterparty_node_id, is_outbound, is_public, is_closed) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
+        + " (rpc_id, channel_id, counterparty_node_id, is_outbound, is_public, is_closed, created_at, last_updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
 
     Ok(sql)
 }
@@ -167,7 +170,7 @@ fn select_channel_from_table_by_rpc_id_sql(for_coin: &str) -> Result<String, Sql
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT rpc_id, channel_id, counterparty_node_id, funding_tx, funding_value, funding_generated_in_block, closing_tx, closure_reason, claiming_tx, claimed_balance, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
+    let sql = "SELECT rpc_id, channel_id, counterparty_node_id, funding_tx, funding_value, funding_generated_in_block, closing_tx, closure_reason, claiming_tx, claimed_balance, is_outbound, is_public, is_closed, created_at, last_updated FROM ".to_owned() + &table_name + " WHERE rpc_id=?1;";
 
     Ok(sql)
 }
@@ -200,6 +203,8 @@ fn channel_details_from_row(row: &Row<'_>) -> Result<SqlChannelDetails, SqlError
         is_outbound: row.get(10)?,
         is_public: row.get(11)?,
         is_closed: row.get(12)?,
+        created_at: row.get::<_, u32>(13)? as u64,
+        last_updated: row.get::<_, u32>(14)? as u64,
     };
     Ok(channel_details)
 }
@@ -264,7 +269,7 @@ fn update_funding_tx_sql(for_coin: &str) -> Result<String, SqlError> {
 
     let sql = "UPDATE ".to_owned()
         + &table_name
-        + " SET funding_tx = ?2, funding_value = ?3, funding_generated_in_block = ?4 WHERE rpc_id = ?1;";
+        + " SET funding_tx = ?2, funding_value = ?3, funding_generated_in_block = ?4, last_updated = ?5 WHERE rpc_id = ?1;";
 
     Ok(sql)
 }
@@ -273,7 +278,9 @@ fn update_channel_to_closed_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "UPDATE ".to_owned() + &table_name + " SET closure_reason = ?2, is_closed = ?3 WHERE rpc_id = ?1;";
+    let sql = "UPDATE ".to_owned()
+        + &table_name
+        + " SET closure_reason = ?2, is_closed = ?3, last_updated = ?4 WHERE rpc_id = ?1;";
 
     Ok(sql)
 }
@@ -282,18 +289,111 @@ fn update_closing_tx_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "UPDATE ".to_owned() + &table_name + " SET closing_tx = ?2 WHERE rpc_id = ?1;";
+    let sql = "UPDATE ".to_owned() + &table_name + " SET closing_tx = ?2, last_updated = ?3 WHERE rpc_id = ?1;";
 
     Ok(sql)
 }
 
-fn get_closed_channels_sql(for_coin: &str) -> Result<String, SqlError> {
+fn get_channels_builder_preimage(for_coin: &str) -> Result<SqlBuilder, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "SELECT rpc_id, channel_id, counterparty_node_id, funding_tx, funding_value, funding_generated_in_block, closing_tx, closure_reason, claiming_tx, claimed_balance, is_outbound, is_public, is_closed FROM ".to_owned() + &table_name + " WHERE is_closed = 1;";
+    let mut sql_builder = SqlBuilder::select_from(table_name);
+    sql_builder.and_where("is_closed = 1");
+    Ok(sql_builder)
+}
 
-    Ok(sql)
+fn finalize_get_channels_sql_builder(sql_builder: &mut SqlBuilder, offset: usize, limit: usize) {
+    sql_builder
+        .field("rpc_id")
+        .field("channel_id")
+        .field("counterparty_node_id")
+        .field("funding_tx")
+        .field("funding_value")
+        .field("funding_generated_in_block")
+        .field("closing_tx")
+        .field("closure_reason")
+        .field("claiming_tx")
+        .field("claimed_balance")
+        .field("is_outbound")
+        .field("is_public")
+        .field("is_closed")
+        .field("created_at")
+        .field("last_updated");
+    sql_builder.offset(offset);
+    sql_builder.limit(limit);
+    sql_builder.order_desc("last_updated");
+}
+
+fn apply_get_channels_filter(builder: &mut SqlBuilder, params: &mut Vec<(&str, String)>, filter: ClosedChannelsFilter) {
+    if let Some(channel_id) = filter.channel_id {
+        builder.and_where("channel_id = :channel_id");
+        params.push((":channel_id", channel_id));
+    }
+
+    if let Some(counterparty_node_id) = filter.counterparty_node_id {
+        builder.and_where("counterparty_node_id = :counterparty_node_id");
+        params.push((":counterparty_node_id", counterparty_node_id));
+    }
+
+    if let Some(funding_tx) = filter.funding_tx {
+        builder.and_where("funding_tx = :funding_tx");
+        params.push((":funding_tx", funding_tx));
+    }
+
+    if let Some(from_funding_value) = filter.from_funding_value {
+        builder.and_where("funding_value >= :from_funding_value");
+        params.push((":from_funding_value", from_funding_value.to_string()));
+    }
+
+    if let Some(to_funding_value) = filter.to_funding_value {
+        builder.and_where("funding_value <= :to_funding_value");
+        params.push((":to_funding_value", to_funding_value.to_string()));
+    }
+
+    if let Some(closing_tx) = filter.closing_tx {
+        builder.and_where("closing_tx = :closing_tx");
+        params.push((":closing_tx", closing_tx));
+    }
+
+    if let Some(closure_reason) = filter.closure_reason {
+        builder.and_where(format!("closure_reason LIKE '%{}%'", closure_reason));
+    }
+
+    if let Some(claiming_tx) = filter.claiming_tx {
+        builder.and_where("claiming_tx = :claiming_tx");
+        params.push((":claiming_tx", claiming_tx));
+    }
+
+    if let Some(from_claimed_balance) = filter.from_claimed_balance {
+        builder.and_where("claimed_balance >= :from_claimed_balance");
+        params.push((":from_claimed_balance", from_claimed_balance.to_string()));
+    }
+
+    if let Some(to_claimed_balance) = filter.to_claimed_balance {
+        builder.and_where("claimed_balance <= :to_claimed_balance");
+        params.push((":to_claimed_balance", to_claimed_balance.to_string()));
+    }
+
+    if let Some(channel_type) = filter.channel_type {
+        let is_outbound = match channel_type {
+            ChannelType::Outbound => true as i32,
+            ChannelType::Inbound => false as i32,
+        };
+
+        builder.and_where("is_outbound = :is_outbound");
+        params.push((":is_outbound", is_outbound.to_string()));
+    }
+
+    if let Some(channel_visibility) = filter.channel_visibility {
+        let is_public = match channel_visibility {
+            ChannelVisibility::Public => true as i32,
+            ChannelVisibility::Private => false as i32,
+        };
+
+        builder.and_where("is_public = :is_public");
+        params.push((":is_public", is_public.to_string()));
+    }
 }
 
 fn get_payments_builder_preimage(for_coin: &str) -> Result<SqlBuilder, SqlError> {
@@ -328,7 +428,8 @@ fn apply_get_payments_filter(builder: &mut SqlBuilder, params: &mut Vec<(&str, S
             PaymentType::InboundPayment => (false as i32, None),
         };
         if let Some(dest) = destination {
-            builder.and_where(format!("destination LIKE '%{}%'", dest));
+            builder.and_where("destination = :dest");
+            params.push((":dest", dest));
         }
 
         builder.and_where("is_outbound = :is_outbound");
@@ -379,7 +480,9 @@ fn update_claiming_tx_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;
 
-    let sql = "UPDATE ".to_owned() + &table_name + " SET claiming_tx = ?2, claimed_balance = ?3 WHERE closing_tx = ?1;";
+    let sql = "UPDATE ".to_owned()
+        + &table_name
+        + " SET claiming_tx = ?2, claimed_balance = ?3, last_updated = ?4 WHERE closing_tx = ?1;";
 
     Ok(sql)
 }
@@ -788,6 +891,8 @@ impl SqlStorage for LightningPersister {
         let is_outbound = (details.is_outbound as i32).to_string();
         let is_public = (details.is_public as i32).to_string();
         let is_closed = (details.is_closed as i32).to_string();
+        let created_at = (details.created_at as u32).to_string();
+        let last_updated = (details.last_updated as u32).to_string();
 
         let params = [
             rpc_id,
@@ -796,6 +901,8 @@ impl SqlStorage for LightningPersister {
             is_outbound,
             is_public,
             is_closed,
+            created_at,
+            last_updated,
         ];
 
         let sqlite_connection = self.sqlite_connection.clone();
@@ -896,8 +1003,15 @@ impl SqlStorage for LightningPersister {
         let rpc_id = rpc_id.to_string();
         let funding_value = funding_value.to_string();
         let funding_generated_in_block = funding_generated_in_block.to_string();
+        let last_updated = (now_ms() / 1000).to_string();
 
-        let params = [rpc_id, funding_tx, funding_value, funding_generated_in_block];
+        let params = [
+            rpc_id,
+            funding_tx,
+            funding_value,
+            funding_generated_in_block,
+            last_updated,
+        ];
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
@@ -914,8 +1028,9 @@ impl SqlStorage for LightningPersister {
         let for_coin = self.storage_ticker.clone();
         let rpc_id = rpc_id.to_string();
         let is_closed = "1".to_string();
+        let last_updated = (now_ms() / 1000).to_string();
 
-        let params = [rpc_id, closure_reason, is_closed];
+        let params = [rpc_id, closure_reason, is_closed, last_updated];
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
@@ -931,8 +1046,9 @@ impl SqlStorage for LightningPersister {
     async fn add_closing_tx_to_sql(&self, rpc_id: u64, closing_tx: String) -> Result<(), Self::Error> {
         let for_coin = self.storage_ticker.clone();
         let rpc_id = rpc_id.to_string();
+        let last_updated = (now_ms() / 1000).to_string();
 
-        let params = [rpc_id, closing_tx];
+        let params = [rpc_id, closing_tx, last_updated];
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
@@ -945,15 +1061,66 @@ impl SqlStorage for LightningPersister {
         .await
     }
 
-    async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error> {
-        let sql = get_closed_channels_sql(self.storage_ticker.as_str())?;
+    async fn get_closed_channels_by_filter(
+        &self,
+        filter: Option<ClosedChannelsFilter>,
+        paging: PagingOptionsEnum<u64>,
+        limit: usize,
+    ) -> Result<GetClosedChannelsResult, Self::Error> {
+        let mut sql_builder = get_channels_builder_preimage(self.storage_ticker.as_str())?;
         let sqlite_connection = self.sqlite_connection.clone();
 
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
+
+            let mut total_builder = sql_builder.clone();
+            total_builder.count("id");
+            let total_sql = total_builder.sql().expect("valid sql");
+            let total: isize = conn.query_row(&total_sql, NO_PARAMS, |row| row.get(0))?;
+            let total = total.try_into().expect("count should be always above zero");
+
+            let offset = match paging {
+                PagingOptionsEnum::PageNumber(page) => (page.get() - 1) * limit,
+                PagingOptionsEnum::FromId(rpc_id) => {
+                    let params = [rpc_id as u32];
+                    let maybe_offset = offset_by_id(
+                        &conn,
+                        &sql_builder,
+                        params,
+                        "rpc_id",
+                        "last_updated DESC",
+                        "rpc_id = ?1",
+                    )?;
+                    match maybe_offset {
+                        Some(offset) => offset,
+                        None => {
+                            return Ok(GetClosedChannelsResult {
+                                channels: vec![],
+                                skipped: 0,
+                                total,
+                            })
+                        },
+                    }
+                },
+            };
+
+            let mut params = vec![];
+            if let Some(f) = filter {
+                apply_get_channels_filter(&mut sql_builder, &mut params, f);
+            }
+            let params_as_trait: Vec<_> = params.iter().map(|(key, value)| (*key, value as &dyn ToSql)).collect();
+            finalize_get_channels_sql_builder(&mut sql_builder, offset, limit);
+
+            let sql = sql_builder.sql().expect("valid sql");
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query(NO_PARAMS)?;
-            let result = rows.mapped(channel_details_from_row).collect::<Result<_, _>>()?;
+            let channels = stmt
+                .query_map_named(params_as_trait.as_slice(), channel_details_from_row)?
+                .collect::<Result<_, _>>()?;
+            let result = GetClosedChannelsResult {
+                channels,
+                skipped: offset,
+                total,
+            };
             Ok(result)
         })
         .await
@@ -1033,8 +1200,9 @@ impl SqlStorage for LightningPersister {
     ) -> Result<(), Self::Error> {
         let for_coin = self.storage_ticker.clone();
         let claimed_balance = claimed_balance.to_string();
+        let last_updated = (now_ms() / 1000).to_string();
 
-        let params = [closing_tx, claiming_tx, claimed_balance];
+        let params = [closing_tx, claiming_tx, claimed_balance, last_updated];
 
         let sqlite_connection = self.sqlite_connection.clone();
         async_blocking(move || {
@@ -1083,6 +1251,58 @@ mod tests {
                 _ => {},
             }
         }
+    }
+
+    fn generate_random_channels(num: u64) -> Vec<SqlChannelDetails> {
+        let mut rng = rand::thread_rng();
+        let mut channels = vec![];
+        let s = Secp256k1::new();
+        let mut bytes = [0; 32];
+        for i in 0..num {
+            let details = SqlChannelDetails {
+                rpc_id: i + 1,
+                channel_id: {
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
+                },
+                counterparty_node_id: {
+                    rng.fill_bytes(&mut bytes);
+                    let secret = SecretKey::from_slice(&bytes).unwrap();
+                    let pubkey = PublicKey::from_secret_key(&s, &secret);
+                    pubkey.to_string()
+                },
+                funding_tx: {
+                    rng.fill_bytes(&mut bytes);
+                    Some(hex::encode(bytes))
+                },
+                funding_value: Some(rng.gen::<u32>() as u64),
+                closing_tx: {
+                    rng.fill_bytes(&mut bytes);
+                    Some(hex::encode(bytes))
+                },
+                closure_reason: {
+                    Some(
+                        rng.sample_iter(&Alphanumeric)
+                            .take(30)
+                            .map(char::from)
+                            .collect::<String>(),
+                    )
+                },
+                claiming_tx: {
+                    rng.fill_bytes(&mut bytes);
+                    Some(hex::encode(bytes))
+                },
+                claimed_balance: Some(rng.gen::<f64>()),
+                funding_generated_in_block: Some(rng.gen::<u32>() as u64),
+                is_outbound: rand::random(),
+                is_public: rand::random(),
+                is_closed: rand::random(),
+                created_at: rng.gen::<u32>() as u64,
+                last_updated: rng.gen::<u32>() as u64,
+            };
+            channels.push(details);
+        }
+        channels
     }
 
     fn generate_random_payments(num: u64) -> Vec<PaymentInfo> {
@@ -1414,13 +1634,15 @@ mod tests {
         let actual_channel_details = block_on(persister.get_channel_from_sql(2)).unwrap().unwrap();
         assert_eq!(expected_channel_details, actual_channel_details);
 
-        let closed_channels = block_on(persister.get_closed_channels()).unwrap();
-        assert_eq!(closed_channels.len(), 1);
-        assert_eq!(expected_channel_details, closed_channels[0]);
+        let closed_channels =
+            block_on(persister.get_closed_channels_by_filter(None, PagingOptionsEnum::default(), 10)).unwrap();
+        assert_eq!(closed_channels.channels.len(), 1);
+        assert_eq!(expected_channel_details, closed_channels.channels[0]);
 
         block_on(persister.update_channel_to_closed(1, "the channel was cooperatively closed".into())).unwrap();
-        let closed_channels = block_on(persister.get_closed_channels()).unwrap();
-        assert_eq!(closed_channels.len(), 2);
+        let closed_channels =
+            block_on(persister.get_closed_channels_by_filter(None, PagingOptionsEnum::default(), 10)).unwrap();
+        assert_eq!(closed_channels.channels.len(), 2);
 
         block_on(persister.add_closing_tx_to_sql(
             2,
@@ -1620,5 +1842,151 @@ mod tests {
         let actual_payments = result.payments;
 
         assert_eq!(expected_payments, actual_payments);
+    }
+
+    #[test]
+    fn test_get_channels_by_filter() {
+        let persister = LightningPersister::new(
+            "test_get_channels_by_filter".into(),
+            PathBuf::from("test_filesystem_persister"),
+            None,
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+        );
+
+        block_on(persister.init_sql()).unwrap();
+
+        let mut channels = generate_random_channels(100);
+
+        for channel in channels.clone() {
+            block_on(persister.add_channel_to_sql(channel.clone())).unwrap();
+            block_on(persister.add_funding_tx_to_sql(
+                channel.rpc_id,
+                channel.funding_tx.unwrap(),
+                channel.funding_value.unwrap(),
+                channel.funding_generated_in_block.unwrap(),
+            ))
+            .unwrap();
+            block_on(persister.update_channel_to_closed(channel.rpc_id, channel.closure_reason.unwrap())).unwrap();
+            block_on(persister.add_closing_tx_to_sql(channel.rpc_id, channel.closing_tx.clone().unwrap())).unwrap();
+            block_on(persister.add_claiming_tx_to_sql(
+                channel.closing_tx.unwrap(),
+                channel.claiming_tx.unwrap(),
+                channel.claimed_balance.unwrap(),
+            ))
+            .unwrap();
+        }
+
+        // get all channels from SQL since updated_at changed from channels generated by generate_random_channels
+        channels = block_on(persister.get_closed_channels_by_filter(None, PagingOptionsEnum::default(), 100))
+            .unwrap()
+            .channels;
+        assert_eq!(100, channels.len());
+
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap());
+        let limit = 4;
+
+        let result = block_on(persister.get_closed_channels_by_filter(None, paging, limit)).unwrap();
+
+        let expected_channels = &channels[..4].to_vec();
+        let actual_channels = &result.channels;
+
+        assert_eq!(0, result.skipped);
+        assert_eq!(100, result.total);
+        assert_eq!(expected_channels, actual_channels);
+
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(2).unwrap());
+        let limit = 5;
+
+        let result = block_on(persister.get_closed_channels_by_filter(None, paging, limit)).unwrap();
+
+        let expected_channels = &channels[5..10].to_vec();
+        let actual_channels = &result.channels;
+
+        assert_eq!(5, result.skipped);
+        assert_eq!(100, result.total);
+        assert_eq!(expected_channels, actual_channels);
+
+        let from_rpc_id = 20;
+        let paging = PagingOptionsEnum::FromId(from_rpc_id);
+        let limit = 3;
+
+        let result = block_on(persister.get_closed_channels_by_filter(None, paging, limit)).unwrap();
+
+        channels.sort_by(|a, b| a.rpc_id.cmp(&b.rpc_id));
+
+        let expected_channels = &channels[20..23].to_vec();
+        let actual_channels = &result.channels;
+
+        assert_eq!(expected_channels, actual_channels);
+
+        channels.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+        let mut filter = ClosedChannelsFilter {
+            channel_id: None,
+            counterparty_node_id: None,
+            funding_tx: None,
+            from_funding_value: None,
+            to_funding_value: None,
+            closing_tx: None,
+            closure_reason: None,
+            claiming_tx: None,
+            from_claimed_balance: None,
+            to_claimed_balance: None,
+            channel_type: Some(ChannelType::Outbound),
+            channel_visibility: None,
+        };
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap());
+        let limit = 10;
+
+        let result =
+            block_on(persister.get_closed_channels_by_filter(Some(filter.clone()), paging.clone(), limit)).unwrap();
+        let expected_channels_vec: Vec<SqlChannelDetails> = channels
+            .iter()
+            .map(|chan| chan.clone())
+            .filter(|chan| chan.is_outbound)
+            .collect();
+        let expected_channels = if expected_channels_vec.len() > 10 {
+            expected_channels_vec[..10].to_vec()
+        } else {
+            expected_channels_vec.clone()
+        };
+        let actual_channels = result.channels;
+
+        assert_eq!(expected_channels, actual_channels);
+
+        filter.channel_visibility = Some(ChannelVisibility::Public);
+        let result =
+            block_on(persister.get_closed_channels_by_filter(Some(filter.clone()), paging.clone(), limit)).unwrap();
+        let expected_channels_vec: Vec<SqlChannelDetails> = expected_channels_vec
+            .iter()
+            .map(|chan| chan.clone())
+            .filter(|chan| chan.is_public)
+            .collect();
+        let expected_channels = if expected_channels_vec.len() > 10 {
+            expected_channels_vec[..10].to_vec()
+        } else {
+            expected_channels_vec
+        };
+        let actual_channels = result.channels;
+
+        assert_eq!(expected_channels, actual_channels);
+
+        let channel_id = channels[42].channel_id.clone();
+        filter.channel_type = None;
+        filter.channel_visibility = None;
+        filter.channel_id = Some(channel_id.clone());
+        let result = block_on(persister.get_closed_channels_by_filter(Some(filter), paging, limit)).unwrap();
+        let expected_channels_vec: Vec<SqlChannelDetails> = channels
+            .iter()
+            .map(|chan| chan.clone())
+            .filter(|chan| chan.channel_id == channel_id)
+            .collect();
+        let expected_channels = if expected_channels_vec.len() > 10 {
+            expected_channels_vec[..10].to_vec()
+        } else {
+            expected_channels_vec.clone()
+        };
+        let actual_channels = result.channels;
+
+        assert_eq!(expected_channels, actual_channels);
     }
 }

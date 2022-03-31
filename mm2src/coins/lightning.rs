@@ -40,8 +40,8 @@ use lightning_background_processor::BackgroundProcessor;
 use lightning_invoice::payment;
 use lightning_invoice::utils::{create_invoice_from_channelmanager, DefaultRouter};
 use lightning_invoice::{Invoice, InvoiceDescription};
-use lightning_persister::storage::{FileSystemStorage, HTLCStatus, NodesAddressesMapShared, PaymentInfo, PaymentType,
-                                   PaymentsFilter, Scorer, SqlChannelDetails, SqlStorage};
+use lightning_persister::storage::{ClosedChannelsFilter, FileSystemStorage, HTLCStatus, NodesAddressesMapShared,
+                                   PaymentInfo, PaymentType, PaymentsFilter, Scorer, SqlChannelDetails, SqlStorage};
 use lightning_persister::LightningPersister;
 use ln_conf::{ChannelOptions, LightningCoinConf, LightningProtocolConf, PlatformCoinConfirmations};
 use ln_errors::{ClaimableBalancesError, ClaimableBalancesResult, CloseChannelError, CloseChannelResult,
@@ -809,11 +809,147 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
 }
 
 #[derive(Deserialize)]
-pub struct ListChannelsRequest {
-    pub coin: String,
+pub struct OpenChannelsFilter {
+    pub channel_id: Option<H256Json>,
+    pub counterparty_node_id: Option<PublicKeyForRPC>,
+    pub funding_tx: Option<H256Json>,
+    pub from_funding_value_sats: Option<u64>,
+    pub to_funding_value_sats: Option<u64>,
+    pub is_outbound: Option<bool>,
+    pub from_balance_msat: Option<u64>,
+    pub to_balance_msat: Option<u64>,
+    pub from_outbound_capacity_msat: Option<u64>,
+    pub to_outbound_capacity_msat: Option<u64>,
+    pub from_inbound_capacity_msat: Option<u64>,
+    pub to_inbound_capacity_msat: Option<u64>,
+    pub confirmed: Option<bool>,
+    pub is_usable: Option<bool>,
+    pub is_public: Option<bool>,
 }
 
-#[derive(Serialize)]
+fn apply_open_channel_filter(channel_details: &ChannelDetailsForRPC, filter: &OpenChannelsFilter) -> bool {
+    let is_channel_id = if let Some(channel_id) = filter.channel_id {
+        channel_details.channel_id == channel_id
+    } else {
+        true
+    };
+
+    let is_counterparty_node_id = if let Some(counterparty_node_id) = &filter.counterparty_node_id {
+        &channel_details.counterparty_node_id == counterparty_node_id
+    } else {
+        true
+    };
+
+    let is_funding_tx = if let Some(funding_tx) = filter.funding_tx {
+        if let Some(channel_details_funding_tx) = channel_details.funding_tx {
+            channel_details_funding_tx == funding_tx
+        } else {
+            false
+        }
+    } else {
+        true
+    };
+
+    let is_from_funding_value_sats = if let Some(from_funding_value_sats) = filter.from_funding_value_sats {
+        channel_details.funding_tx_value_sats >= from_funding_value_sats
+    } else {
+        true
+    };
+
+    let is_to_funding_value_sats = if let Some(to_funding_value_sats) = filter.to_funding_value_sats {
+        channel_details.funding_tx_value_sats <= to_funding_value_sats
+    } else {
+        true
+    };
+
+    let is_outbound = if let Some(is_outbound) = filter.is_outbound {
+        channel_details.is_outbound == is_outbound
+    } else {
+        true
+    };
+
+    let is_from_balance_msat = if let Some(from_balance_msat) = filter.from_balance_msat {
+        channel_details.balance_msat >= from_balance_msat
+    } else {
+        true
+    };
+
+    let is_to_balance_msat = if let Some(to_balance_msat) = filter.to_balance_msat {
+        channel_details.balance_msat <= to_balance_msat
+    } else {
+        true
+    };
+
+    let is_from_outbound_capacity_msat = if let Some(from_outbound_capacity_msat) = filter.from_outbound_capacity_msat {
+        channel_details.outbound_capacity_msat >= from_outbound_capacity_msat
+    } else {
+        true
+    };
+
+    let is_to_outbound_capacity_msat = if let Some(to_outbound_capacity_msat) = filter.to_outbound_capacity_msat {
+        channel_details.outbound_capacity_msat <= to_outbound_capacity_msat
+    } else {
+        true
+    };
+
+    let is_from_inbound_capacity_msat = if let Some(from_inbound_capacity_msat) = filter.from_inbound_capacity_msat {
+        channel_details.inbound_capacity_msat >= from_inbound_capacity_msat
+    } else {
+        true
+    };
+
+    let is_to_inbound_capacity_msat = if let Some(to_inbound_capacity_msat) = filter.to_inbound_capacity_msat {
+        channel_details.inbound_capacity_msat <= to_inbound_capacity_msat
+    } else {
+        true
+    };
+
+    let is_confirmed = if let Some(confirmed) = filter.confirmed {
+        channel_details.confirmed == confirmed
+    } else {
+        true
+    };
+
+    let is_usable = if let Some(is_usable) = filter.is_usable {
+        channel_details.is_usable == is_usable
+    } else {
+        true
+    };
+
+    let is_public = if let Some(is_public) = filter.is_public {
+        channel_details.is_public == is_public
+    } else {
+        true
+    };
+
+    is_channel_id
+        && is_counterparty_node_id
+        && is_funding_tx
+        && is_from_funding_value_sats
+        && is_to_funding_value_sats
+        && is_outbound
+        && is_from_balance_msat
+        && is_to_balance_msat
+        && is_from_outbound_capacity_msat
+        && is_to_outbound_capacity_msat
+        && is_from_inbound_capacity_msat
+        && is_to_inbound_capacity_msat
+        && is_confirmed
+        && is_usable
+        && is_public
+}
+
+#[derive(Deserialize)]
+pub struct ListOpenChannelsRequest {
+    pub coin: String,
+    pub filter: Option<OpenChannelsFilter>,
+    #[serde(default = "ten")]
+    limit: usize,
+    #[serde(default)]
+    paging_options: PagingOptionsEnum<u64>,
+}
+
+#[derive(Clone, Serialize)]
 pub struct ChannelDetailsForRPC {
     pub rpc_channel_id: u64,
     pub channel_id: H256Json,
@@ -859,29 +995,110 @@ impl From<ChannelDetails> for ChannelDetailsForRPC {
 }
 
 #[derive(Serialize)]
-pub struct ListChannelsResponse {
+pub struct ListOpenChannelsResponse {
     open_channels: Vec<ChannelDetailsForRPC>,
-    closed_channels: Vec<SqlChannelDetails>,
+    limit: usize,
+    skipped: usize,
+    total: usize,
+    total_pages: usize,
+    paging_options: PagingOptionsEnum<u64>,
 }
 
-pub async fn list_channels(ctx: MmArc, req: ListChannelsRequest) -> ListChannelsResult<ListChannelsResponse> {
+pub async fn list_open_channels_by_filter(
+    ctx: MmArc,
+    req: ListOpenChannelsRequest,
+) -> ListChannelsResult<ListOpenChannelsResponse> {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await?;
     let ln_coin = match coin {
         MmCoinEnum::LightningCoin(c) => c,
         _ => return MmError::err(ListChannelsError::UnsupportedCoin(coin.ticker().to_string())),
     };
-    let open_channels = ln_coin
+    let mut total_open_channels: Vec<ChannelDetailsForRPC> = ln_coin
         .channel_manager
         .list_channels()
         .into_iter()
         .map(From::from)
         .collect();
 
-    let closed_channels = ln_coin.persister.get_closed_channels().await?;
+    total_open_channels.sort_by(|a, b| a.rpc_channel_id.cmp(&b.rpc_channel_id));
 
-    Ok(ListChannelsResponse {
+    let total = total_open_channels.len();
+
+    let offset = match req.paging_options {
+        PagingOptionsEnum::PageNumber(page) => (page.get() - 1) * req.limit,
+        PagingOptionsEnum::FromId(rpc_id) => total_open_channels
+            .iter()
+            .position(|x| x.rpc_channel_id == rpc_id)
+            .map(|pos| pos + 1)
+            .unwrap_or_default(),
+    };
+
+    let open_channels_filtered = if let Some(ref filter) = req.filter {
+        total_open_channels
+            .into_iter()
+            .filter(|chan| apply_open_channel_filter(chan, filter))
+            .collect()
+    } else {
+        total_open_channels
+    };
+
+    let open_channels = if offset + req.limit <= open_channels_filtered.len() {
+        open_channels_filtered[offset..offset + req.limit].to_vec()
+    } else {
+        open_channels_filtered[offset..].to_vec()
+    };
+
+    Ok(ListOpenChannelsResponse {
         open_channels,
-        closed_channels,
+        limit: req.limit,
+        skipped: offset,
+        total,
+        total_pages: calc_total_pages(total, req.limit),
+        paging_options: req.paging_options,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ListClosedChannelsRequest {
+    pub coin: String,
+    pub filter: Option<ClosedChannelsFilter>,
+    #[serde(default = "ten")]
+    limit: usize,
+    #[serde(default)]
+    paging_options: PagingOptionsEnum<u64>,
+}
+
+#[derive(Serialize)]
+pub struct ListClosedChannelsResponse {
+    closed_channels: Vec<SqlChannelDetails>,
+    limit: usize,
+    skipped: usize,
+    total: usize,
+    total_pages: usize,
+    paging_options: PagingOptionsEnum<u64>,
+}
+
+pub async fn list_closed_channels_by_filter(
+    ctx: MmArc,
+    req: ListClosedChannelsRequest,
+) -> ListChannelsResult<ListClosedChannelsResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin).await?;
+    let ln_coin = match coin {
+        MmCoinEnum::LightningCoin(c) => c,
+        _ => return MmError::err(ListChannelsError::UnsupportedCoin(coin.ticker().to_string())),
+    };
+    let closed_channels_res = ln_coin
+        .persister
+        .get_closed_channels_by_filter(req.filter, req.paging_options.clone(), req.limit)
+        .await?;
+
+    Ok(ListClosedChannelsResponse {
+        closed_channels: closed_channels_res.channels,
+        limit: req.limit,
+        skipped: closed_channels_res.skipped,
+        total: closed_channels_res.total,
+        total_pages: calc_total_pages(closed_channels_res.total, req.limit),
+        paging_options: req.paging_options,
     })
 }
 

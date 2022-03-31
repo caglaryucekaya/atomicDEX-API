@@ -32,7 +32,7 @@ use std::net::SocketAddr;
 
 cfg_native! {
     use coins::lightning::{close_channel, connect_to_lightning_node, generate_invoice, get_channel_details,
-        get_claimable_balances, get_payment_details, list_channels, list_payments_by_filter, open_channel,
+        get_claimable_balances, get_payment_details, list_closed_channels_by_filter, list_open_channels_by_filter, list_payments_by_filter, open_channel,
         send_payment, LightningCoin};
 }
 
@@ -160,7 +160,8 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             "get_channel_details" => handle_mmrpc(ctx, request, get_channel_details).await,
             "get_claimable_balances" => handle_mmrpc(ctx, request, get_claimable_balances).await,
             "get_payment_details" => handle_mmrpc(ctx, request, get_payment_details).await,
-            "list_channels" => handle_mmrpc(ctx, request, list_channels).await,
+            "list_closed_channels_by_filter" => handle_mmrpc(ctx, request, list_closed_channels_by_filter).await,
+            "list_open_channels_by_filter" => handle_mmrpc(ctx, request, list_open_channels_by_filter).await,
             "list_payments_by_filter" => handle_mmrpc(ctx, request, list_payments_by_filter).await,
             "open_channel" => handle_mmrpc(ctx, request, open_channel).await,
             "send_payment" => handle_mmrpc(ctx, request, send_payment).await,

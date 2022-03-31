@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::Network;
-use common::PagingOptionsEnum;
+use common::{now_ms, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::types::FromSqlError;
 use derive_more::Display;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
@@ -61,6 +61,8 @@ pub struct SqlChannelDetails {
     pub is_outbound: bool,
     pub is_public: bool,
     pub is_closed: bool,
+    pub created_at: u64,
+    pub last_updated: u64,
 }
 
 impl SqlChannelDetails {
@@ -85,8 +87,44 @@ impl SqlChannelDetails {
             is_outbound,
             is_public,
             is_closed: false,
+            created_at: now_ms() / 1000,
+            last_updated: now_ms() / 1000,
         }
     }
+}
+
+#[derive(Clone, Deserialize)]
+pub enum ChannelType {
+    Outbound,
+    Inbound,
+}
+
+#[derive(Clone, Deserialize)]
+pub enum ChannelVisibility {
+    Public,
+    Private,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ClosedChannelsFilter {
+    pub channel_id: Option<String>,
+    pub counterparty_node_id: Option<String>,
+    pub funding_tx: Option<String>,
+    pub from_funding_value: Option<u64>,
+    pub to_funding_value: Option<u64>,
+    pub closing_tx: Option<String>,
+    pub closure_reason: Option<String>,
+    pub claiming_tx: Option<String>,
+    pub from_claimed_balance: Option<f64>,
+    pub to_claimed_balance: Option<f64>,
+    pub channel_type: Option<ChannelType>,
+    pub channel_visibility: Option<ChannelVisibility>,
+}
+
+pub struct GetClosedChannelsResult {
+    pub channels: Vec<SqlChannelDetails>,
+    pub skipped: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]
@@ -180,7 +218,12 @@ pub trait SqlStorage {
 
     async fn add_closing_tx_to_sql(&self, rpc_id: u64, closing_tx_: String) -> Result<(), Self::Error>;
 
-    async fn get_closed_channels(&self) -> Result<Vec<SqlChannelDetails>, Self::Error>;
+    async fn get_closed_channels_by_filter(
+        &self,
+        filter: Option<ClosedChannelsFilter>,
+        paging: PagingOptionsEnum<u64>,
+        limit: usize,
+    ) -> Result<GetClosedChannelsResult, Self::Error>;
 
     async fn get_payments_by_filter(
         &self,
