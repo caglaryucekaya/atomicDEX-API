@@ -1,7 +1,7 @@
 use crate::utxo::utxo_builder::{UtxoCoinBuildError, UtxoCoinBuilder, UtxoCoinBuilderCommonOps,
                                 UtxoFieldsWithHardwareWalletBuilder, UtxoFieldsWithIguanaPrivKeyBuilder};
 use crate::utxo::utxo_common::merge_utxo_loop;
-use crate::utxo::{UtxoArc, UtxoCoinFields, UtxoCommonOps, UtxoWeak};
+use crate::utxo::{UtxoArc, UtxoCommonOps, UtxoWeak};
 use crate::{PrivKeyBuildPolicy, UtxoActivationParams};
 use async_trait::async_trait;
 use common::executor::spawn;
@@ -73,7 +73,7 @@ impl<'a, F, T> UtxoFieldsWithHardwareWalletBuilder for UtxoArcBuilder<'a, F, T> 
 impl<'a, F, T> UtxoCoinBuilder for UtxoArcBuilder<'a, F, T>
 where
     F: Fn(UtxoArc) -> T + Clone + Send + Sync + 'static,
-    T: AsRef<UtxoCoinFields> + UtxoCommonOps + Send + Sync + 'static,
+    T: UtxoCommonOps,
 {
     type ResultCoin = T;
     type Error = UtxoCoinBuildError;
@@ -94,14 +94,11 @@ where
 impl<'a, F, T> MergeUtxoArcOps<T> for UtxoArcBuilder<'a, F, T>
 where
     F: Fn(UtxoArc) -> T + Send + Sync + 'static,
-    T: AsRef<UtxoCoinFields> + UtxoCommonOps + Send + Sync + 'static,
+    T: UtxoCommonOps,
 {
 }
 
-pub trait MergeUtxoArcOps<T>: UtxoCoinBuilderCommonOps
-where
-    T: AsRef<UtxoCoinFields> + UtxoCommonOps + Send + Sync + 'static,
-{
+pub trait MergeUtxoArcOps<T: UtxoCommonOps>: UtxoCoinBuilderCommonOps {
     fn spawn_merge_utxo_loop_if_required<F>(&self, weak: UtxoWeak, constructor: F)
     where
         F: Fn(UtxoArc) -> T + Send + Sync + 'static,

@@ -99,7 +99,7 @@ impl From<Bip32Error> for WithdrawError {
 pub trait UtxoWithdraw<Coin>
 where
     Self: Sized + Sync,
-    Coin: AsRef<UtxoCoinFields> + UtxoCommonOps + MarketCoinOps + Send + Sync + 'static,
+    Coin: UtxoCommonOps,
 {
     fn coin(&self) -> &Coin;
 
@@ -126,6 +126,7 @@ where
 
     async fn build(self) -> WithdrawResult {
         let coin = self.coin();
+        let ticker = coin.as_ref().conf.ticker.clone();
         let decimals = coin.as_ref().decimals;
         let conf = &self.coin().as_ref().conf;
         let req = self.request();
@@ -187,9 +188,10 @@ where
             },
             None => (),
         };
-        let (unsigned, data) = tx_builder.build().await.mm_err(|gen_tx_error| {
-            WithdrawError::from_generate_tx_error(gen_tx_error, coin.ticker().to_owned(), decimals)
-        })?;
+        let (unsigned, data) = tx_builder
+            .build()
+            .await
+            .mm_err(|gen_tx_error| WithdrawError::from_generate_tx_error(gen_tx_error, ticker.clone(), decimals))?;
 
         // Sign the `unsigned` transaction.
         let signed = self.sign_tx(unsigned).await?;
@@ -199,7 +201,7 @@ where
 
         let fee_amount = data.fee_amount + data.unused_change.unwrap_or_default();
         let fee_details = UtxoFeeDetails {
-            coin: Some(self.coin().as_ref().conf.ticker.clone()),
+            coin: Some(ticker.clone()),
             amount: big_decimal_from_sat(fee_amount as i64, decimals),
         };
         let tx_hex = match coin.addr_format() {
@@ -217,7 +219,7 @@ where
             tx_hex,
             fee_details: Some(fee_details.into()),
             block_height: 0,
-            coin: coin.as_ref().conf.ticker.clone(),
+            coin: ticker,
             internal_id: vec![].into(),
             timestamp: now_ms() / 1000,
             kmd_rewards: data.kmd_rewards,
@@ -243,7 +245,7 @@ pub struct InitUtxoWithdraw<'a, Coin> {
 #[async_trait]
 impl<'a, Coin> UtxoWithdraw<Coin> for InitUtxoWithdraw<'a, Coin>
 where
-    Coin: AsRef<UtxoCoinFields> + UtxoCommonOps + MarketCoinOps + UtxoSignerOps + Send + Sync + 'static,
+    Coin: UtxoCommonOps + UtxoSignerOps,
 {
     fn coin(&self) -> &Coin { &self.coin }
 
@@ -336,12 +338,7 @@ impl<'a, Coin> InitUtxoWithdraw<'a, Coin> {
         task_handle: &'a WithdrawTaskHandle,
     ) -> Result<InitUtxoWithdraw<'a, Coin>, MmError<WithdrawError>>
     where
-        Coin: AsRef<UtxoCoinFields>
-            + UtxoCommonOps
-            + MarketCoinOps
-            + UtxoSignerOps
-            + CoinWithDerivationMethod
-            + GetWithdrawSenderAddress<Address = Address, Pubkey = PublicKey>,
+        Coin: CoinWithDerivationMethod + GetWithdrawSenderAddress<Address = Address, Pubkey = PublicKey>,
     {
         let from = coin.get_withdraw_sender_address(&req).await?;
         let from_address_string = from.address.display_address().map_to_mm(WithdrawError::InternalError)?;
@@ -406,7 +403,7 @@ pub struct StandardUtxoWithdraw<Coin> {
 #[async_trait]
 impl<Coin> UtxoWithdraw<Coin> for StandardUtxoWithdraw<Coin>
 where
-    Coin: AsRef<UtxoCoinFields> + UtxoCommonOps + MarketCoinOps + Send + Sync + 'static,
+    Coin: UtxoCommonOps,
 {
     fn coin(&self) -> &Coin { &self.coin }
 

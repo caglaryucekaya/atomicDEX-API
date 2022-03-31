@@ -678,7 +678,9 @@ impl UtxoAddressScanner {
 
 #[async_trait]
 #[cfg_attr(test, mockable)]
-pub trait UtxoCommonOps: UtxoTxGenerationOps + UtxoTxBroadcastOps {
+pub trait UtxoCommonOps:
+    AsRef<UtxoCoinFields> + UtxoTxGenerationOps + UtxoTxBroadcastOps + Clone + Send + Sync + 'static
+{
     async fn get_htlc_spend_fee(&self, tx_size: u64) -> UtxoRpcResult<u64>;
 
     fn addresses_from_script(&self, script: &Script) -> Result<Vec<Address>, String>;
@@ -1331,10 +1333,7 @@ pub struct KmdRewardsInfoElement {
 
 /// Get rewards info of unspent outputs.
 /// The list is ordered by the output value.
-pub async fn kmd_rewards_info<T>(coin: &T) -> Result<Vec<KmdRewardsInfoElement>, String>
-where
-    T: AsRef<UtxoCoinFields> + UtxoCommonOps,
-{
+pub async fn kmd_rewards_info<T: UtxoCommonOps>(coin: &T) -> Result<Vec<KmdRewardsInfoElement>, String> {
     if coin.as_ref().conf.ticker != "KMD" {
         return ERR!("rewards info can be obtained for KMD only");
     }
@@ -1403,7 +1402,7 @@ pub fn sat_from_big_decimal(amount: &BigDecimal, decimals: u8) -> NumConversResu
 
 async fn send_outputs_from_my_address_impl<T>(coin: T, outputs: Vec<TransactionOutput>) -> Result<UtxoTx, String>
 where
-    T: AsRef<UtxoCoinFields> + UtxoCommonOps,
+    T: UtxoCommonOps,
 {
     let my_address = try_s!(coin.as_ref().derivation_method.iguana_or_err());
     let (unspents, recently_sent_txs) = try_s!(coin.list_unspent_ordered(my_address).await);
