@@ -893,18 +893,16 @@ pub async fn enable_native(mm: &MarketMakerIt, coin: &str, urls: &[&str]) -> Jso
 }
 
 pub async fn enable_spl(mm: &MarketMakerIt, coin: &str) -> Json {
-    let enable = mm
-        .rpc(json! ({
-            "userpass": mm.userpass,
-            "method": "enable_spl",
-            "mmrpc": "2.0",
-            "params": {
-                "ticker": coin,
-                "activation_params": {}
-            }
-        }))
-        .await
-        .unwrap();
+    let req = json!({
+        "userpass": mm.userpass,
+        "method": "enable_spl",
+        "mmrpc": "2.0",
+        "params": {
+            "ticker": coin,
+            "activation_params": {}
+        }
+    });
+    let enable = mm.rpc(&req).await.unwrap();
     assert_eq!(enable.0, StatusCode::OK, "'enable_spl' failed: {}", enable.1);
     json::from_str(&enable.1).unwrap()
 }
@@ -991,23 +989,21 @@ pub async fn enable_solana_with_tokens(
     tx_history: bool,
 ) -> Json {
     let spl_requests: Vec<_> = tokens.iter().map(|ticker| json!({ "ticker": ticker })).collect();
+    let req = json! ({
+        "userpass": mm.userpass,
+        "method": "enable_solana_with_tokens",
+        "mmrpc": "2.0",
+        "params": {
+            "ticker": platform_coin,
+            "confirmation_commitment": "finalized",
+            "allow_slp_unsafe_conf": true,
+            "client_url": solana_client_url,
+            "tx_history": tx_history,
+            "spl_tokens_requests": spl_requests,
+        }
+    });
 
-    let enable = mm
-        .rpc(json! ({
-            "userpass": mm.userpass,
-            "method": "enable_solana_with_tokens",
-            "mmrpc": "2.0",
-            "params": {
-                "ticker": platform_coin,
-                "confirmation_commitment": "finalized",
-                "allow_slp_unsafe_conf": true,
-                "client_url": solana_client_url,
-                "tx_history": tx_history,
-                "spl_tokens_requests": spl_requests,
-            }
-        }))
-        .await
-        .unwrap();
+    let enable = mm.rpc(&req).await.unwrap();
     assert_eq!(
         enable.0,
         StatusCode::OK,

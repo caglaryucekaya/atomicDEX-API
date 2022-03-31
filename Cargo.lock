@@ -270,7 +270,7 @@ version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10f203db73a71dfa2fb6dd22763990fa26f3d2625a6da2da900d23b87d26be27"
 dependencies = [
- "proc-macro2",
+ "proc-macro2 1.0.27",
  "quote 1.0.7",
  "syn 1.0.72",
 ]
@@ -1140,7 +1140,7 @@ dependencies = [
  "spv_validation",
  "tiny-bip39",
  "tokio",
- "tokio-rustls",
+ "tokio-rustls 0.22.0",
  "tonic",
  "tonic-build",
  "utxo_signer",
@@ -5593,7 +5593,7 @@ dependencies = [
  "futures-util",
  "h2",
  "http 0.2.1",
- "http-body 0.4.2",
+ "http-body 0.4.4",
  "hyper",
  "hyper-rustls 0.23.0",
  "ipnet",
@@ -7849,17 +7849,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-stream"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50145484efff8818b5ccd256697f36863f587da82cf8b409c53adf1e840798e3"
-dependencies = [
- "futures-core",
- "pin-project-lite 0.2.6",
- "tokio",
-]
-
-[[package]]
 name = "tokio-timer"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7931,7 +7920,7 @@ dependencies = [
  "prost",
  "prost-derive",
  "tokio",
- "tokio-rustls",
+ "tokio-rustls 0.22.0",
  "tokio-stream",
  "tokio-util",
  "tower",
@@ -7947,7 +7936,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12b52d07035516c2b74337d2ac7746075e7dcae7643816c1b12c5ff8a7484c08"
 dependencies = [
- "proc-macro2",
+ "proc-macro2 1.0.27",
  "prost-build",
  "quote 1.0.7",
  "syn 1.0.72",
@@ -8004,7 +7993,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e65ce065b4b5c53e73bb28912318cb8c9e9ad3921f1d669eb0e68b4c8143a2b"
 dependencies = [
- "proc-macro2",
+ "proc-macro2 1.0.27",
  "quote 1.0.7",
  "syn 1.0.72",
 ]

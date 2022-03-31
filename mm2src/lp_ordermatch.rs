@@ -5473,6 +5473,9 @@ fn orderbook_address(
             }
         },
         #[cfg(not(target_arch = "wasm32"))]
+        // TODO ask Slyris
+        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } => unimplemented!(),
+        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::LIGHTNING { .. } => MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned())),
         #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::ZHTLC => Ok(OrderbookAddress::Shielded),

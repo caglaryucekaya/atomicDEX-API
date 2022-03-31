@@ -438,10 +438,10 @@ pub fn lp_network_ports(netid: u16) -> Result<NetworkPorts, MmError<NetIdError>>
 pub fn peer_id_from_secp_secret(secp_secret: &[u8]) -> PrivKeyResult<PeerId> {
     let key_pair = key_pair_from_secret(secp_secret)?;
     let public_key = Libp2pSecpPublic::decode(key_pair.public_slice()).expect("keypair is valid");
-    Ok(PeerId::from_public_key(Libp2pPublic::Secp256k1(public_key)))
+    Ok(PeerId::from_public_key(&Libp2pPublic::Secp256k1(public_key)))
 }
 
 pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<DecodingError>> {
     let public_key = Libp2pSecpPublic::decode(secp_public)?;
-    Ok(PeerId::from_public_key(Libp2pPublic::Secp256k1(public_key)))
+    Ok(PeerId::from_public_key(&Libp2pPublic::Secp256k1(public_key)))
 }
