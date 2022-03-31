@@ -169,7 +169,7 @@ where
         let priv_key_policy = PrivKeyBuildPolicy::from_crypto_ctx(&self.crypto_ctx);
         let coin = Standalone::init_standalone_coin(
             self.ctx.clone(),
-            self.request.ticker.clone(),
+            ticker.clone(),
             self.coin_conf,
             &self.request.activation_params,
             self.protocol_info,
@@ -184,11 +184,7 @@ where
 
         let tx_history = self.request.activation_params.tx_history_enabled();
 
-        lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams {
-            ticker: ticker.clone(),
-            tx_history,
-        })
-        .await?;
+        lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams { ticker, tx_history }).await?;
 
         Ok(result)
     }

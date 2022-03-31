@@ -52,6 +52,7 @@ use zcash_primitives::sapling::{Node, Note};
 use zcash_primitives::transaction::builder::Builder as ZTxBuilder;
 use zcash_primitives::transaction::components::{Amount, TxOut};
 use zcash_primitives::transaction::Transaction as ZTransaction;
+use zcash_primitives::zip32::ExtendedFullViewingKey;
 use zcash_primitives::{consensus, constants::mainnet as z_mainnet_constants, sapling::PaymentAddress,
                        zip32::ExtendedSpendingKey};
 use zcash_proofs::prover::LocalTxProver;
@@ -245,9 +246,8 @@ impl ZCoin {
 
         let mut ext = HashMap::new();
 
-        // impl<'a> From<&'a ExtendedSpendingKey> for ExtendedFullViewingKey
-        #[allow(clippy::needless_borrow)]
-        ext.insert(AccountId::default(), (&self.z_fields.z_spending_key).into());
+        let evk = ExtendedFullViewingKey::from(&self.z_fields.z_spending_key);
+        ext.insert(AccountId::default(), evk);
         let mut selected_notes_with_witness: Vec<(_, IncrementalWitness<Node>)> =
             Vec::with_capacity(selected_unspents.len());
 

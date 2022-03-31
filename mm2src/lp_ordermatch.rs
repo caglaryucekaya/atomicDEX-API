@@ -3710,22 +3710,17 @@ impl OrderbookP2PItem {
         let max_vol_mm = MmNumber::from(self.max_volume.clone());
         let min_vol_mm = MmNumber::from(self.min_volume.clone());
 
-        let base_max_volume = max_vol_mm.clone().into();
-        let base_min_volume = min_vol_mm.clone().into();
-        let rel_max_volume = (&max_vol_mm * &price_mm).into();
-        let rel_min_volume = (&min_vol_mm * &price_mm).into();
-
         RpcOrderbookEntryV2 {
             coin: self.rel.clone(),
             address,
+            rel_max_volume: (&max_vol_mm * &price_mm).into(),
+            rel_min_volume: (&min_vol_mm * &price_mm).into(),
             price: price_mm.into(),
             pubkey: self.pubkey.clone(),
             uuid: self.uuid,
             is_mine,
-            base_max_volume,
-            base_min_volume,
-            rel_max_volume,
-            rel_min_volume,
+            base_max_volume: max_vol_mm.into(),
+            base_min_volume: min_vol_mm.into(),
             conf_settings: conf_settings.cloned(),
         }
     }
@@ -3781,23 +3776,19 @@ impl OrderbookP2PItem {
         let max_vol_mm = MmNumber::from(self.max_volume.clone());
         let min_vol_mm = MmNumber::from(self.min_volume.clone());
 
-        let base_max_volume = (&max_vol_mm / &price_mm).into();
-        let base_min_volume = (&min_vol_mm / &price_mm).into();
-        let rel_max_volume = max_vol_mm.into();
-        let rel_min_volume = min_vol_mm.into();
         let conf_settings = conf_settings.map(|conf| conf.reversed());
 
         RpcOrderbookEntryV2 {
             coin: self.base.clone(),
             address,
+            base_max_volume: (&max_vol_mm / &price_mm).into(),
+            base_min_volume: (&min_vol_mm / &price_mm).into(),
             price: price_mm.into(),
             pubkey: self.pubkey.clone(),
             uuid: self.uuid,
             is_mine,
-            base_max_volume,
-            base_min_volume,
-            rel_max_volume,
-            rel_min_volume,
+            rel_max_volume: max_vol_mm.into(),
+            rel_min_volume: min_vol_mm.into(),
             conf_settings,
         }
     }
@@ -3978,22 +3969,17 @@ impl OrderbookItem {
         let max_vol_mm = MmNumber::from(self.max_volume.clone());
         let min_vol_mm = MmNumber::from(self.min_volume.clone());
 
-        let base_max_volume = max_vol_mm.clone().into();
-        let base_min_volume = min_vol_mm.clone().into();
-        let rel_max_volume = (&max_vol_mm * &price_mm).into();
-        let rel_min_volume = (&min_vol_mm * &price_mm).into();
-
         RpcOrderbookEntryV2 {
             coin: self.base.clone(),
             address,
+            rel_max_volume: (&max_vol_mm * &price_mm).into(),
+            rel_min_volume: (&min_vol_mm * &price_mm).into(),
             price: price_mm.into(),
             pubkey: self.pubkey.clone(),
             uuid: self.uuid,
             is_mine,
-            base_max_volume,
-            base_min_volume,
-            rel_max_volume,
-            rel_min_volume,
+            base_max_volume: max_vol_mm.into(),
+            base_min_volume: min_vol_mm.into(),
             conf_settings: self.conf_settings,
         }
     }
@@ -4003,23 +3989,19 @@ impl OrderbookItem {
         let max_vol_mm = MmNumber::from(self.max_volume.clone());
         let min_vol_mm = MmNumber::from(self.min_volume.clone());
 
-        let base_max_volume = (&max_vol_mm / &price_mm).into();
-        let base_min_volume = (&min_vol_mm / &price_mm).into();
-        let rel_max_volume = max_vol_mm.into();
-        let rel_min_volume = min_vol_mm.into();
         let conf_settings = self.conf_settings.map(|conf| conf.reversed());
 
         RpcOrderbookEntryV2 {
             coin: self.base.clone(),
             address,
+            base_max_volume: (&max_vol_mm / &price_mm).into(),
+            base_min_volume: (&min_vol_mm / &price_mm).into(),
             price: price_mm.into(),
             pubkey: self.pubkey.clone(),
             uuid: self.uuid,
             is_mine,
-            base_max_volume,
-            base_min_volume,
-            rel_max_volume,
-            rel_min_volume,
+            rel_max_volume: max_vol_mm.into(),
+            rel_min_volume: min_vol_mm.into(),
             conf_settings,
         }
     }
