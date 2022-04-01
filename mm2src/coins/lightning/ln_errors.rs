@@ -43,8 +43,8 @@ pub enum EnableLightningError {
     HashError(String),
     #[display(fmt = "RPC error {}", _0)]
     RpcError(String),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
     ConnectToNodeError(String),
 }
 
@@ -60,7 +60,7 @@ impl HttpStatusCode for EnableLightningError {
             | EnableLightningError::HashError(_)
             | EnableLightningError::ConnectToNodeError(_)
             | EnableLightningError::InvalidConfiguration(_)
-            | EnableLightningError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | EnableLightningError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -70,7 +70,7 @@ impl From<std::io::Error> for EnableLightningError {
 }
 
 impl From<SqlError> for EnableLightningError {
-    fn from(err: SqlError) -> EnableLightningError { EnableLightningError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> EnableLightningError { EnableLightningError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -135,8 +135,8 @@ pub enum OpenChannelError {
     InternalError(String),
     #[display(fmt = "I/O error {}", _0)]
     IOError(String),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
     ConnectToNodeError(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
@@ -158,7 +158,7 @@ impl HttpStatusCode for OpenChannelError {
             | OpenChannelError::InternalError(_)
             | OpenChannelError::GenerateTxErr(_)
             | OpenChannelError::IOError(_)
-            | OpenChannelError::SqlError(_)
+            | OpenChannelError::DbError(_)
             | OpenChannelError::InvalidPath(_)
             | OpenChannelError::ConvertTxErr(_) => StatusCode::INTERNAL_SERVER_ERROR,
             OpenChannelError::NoSuchCoin(_) | OpenChannelError::BalanceError(_) => StatusCode::PRECONDITION_REQUIRED,
@@ -211,7 +211,7 @@ impl From<std::io::Error> for OpenChannelError {
 }
 
 impl From<SqlError> for OpenChannelError {
-    fn from(err: SqlError) -> OpenChannelError { OpenChannelError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> OpenChannelError { OpenChannelError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -221,8 +221,8 @@ pub enum ListChannelsError {
     UnsupportedCoin(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
 }
 
 impl HttpStatusCode for ListChannelsError {
@@ -230,7 +230,7 @@ impl HttpStatusCode for ListChannelsError {
         match self {
             ListChannelsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             ListChannelsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
-            ListChannelsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ListChannelsError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -244,7 +244,7 @@ impl From<CoinFindError> for ListChannelsError {
 }
 
 impl From<SqlError> for ListChannelsError {
-    fn from(err: SqlError) -> ListChannelsError { ListChannelsError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> ListChannelsError { ListChannelsError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -256,8 +256,8 @@ pub enum GetChannelDetailsError {
     NoSuchCoin(String),
     #[display(fmt = "Channel with rpc id: {} is not found", _0)]
     NoSuchChannel(u64),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
 }
 
 impl HttpStatusCode for GetChannelDetailsError {
@@ -266,7 +266,7 @@ impl HttpStatusCode for GetChannelDetailsError {
             GetChannelDetailsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             GetChannelDetailsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
             GetChannelDetailsError::NoSuchChannel(_) => StatusCode::NOT_FOUND,
-            GetChannelDetailsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            GetChannelDetailsError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -280,7 +280,7 @@ impl From<CoinFindError> for GetChannelDetailsError {
 }
 
 impl From<SqlError> for GetChannelDetailsError {
-    fn from(err: SqlError) -> GetChannelDetailsError { GetChannelDetailsError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> GetChannelDetailsError { GetChannelDetailsError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -292,8 +292,8 @@ pub enum GenerateInvoiceError {
     NoSuchCoin(String),
     #[display(fmt = "Invoice signing or creation error: {}", _0)]
     SignOrCreationError(String),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
 }
 
 impl HttpStatusCode for GenerateInvoiceError {
@@ -301,7 +301,7 @@ impl HttpStatusCode for GenerateInvoiceError {
         match self {
             GenerateInvoiceError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             GenerateInvoiceError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
-            GenerateInvoiceError::SignOrCreationError(_) | GenerateInvoiceError::SqlError(_) => {
+            GenerateInvoiceError::SignOrCreationError(_) | GenerateInvoiceError::DbError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             },
         }
@@ -321,7 +321,7 @@ impl From<SignOrCreationError> for GenerateInvoiceError {
 }
 
 impl From<SqlError> for GenerateInvoiceError {
-    fn from(err: SqlError) -> GenerateInvoiceError { GenerateInvoiceError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> GenerateInvoiceError { GenerateInvoiceError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -337,8 +337,8 @@ pub enum SendPaymentError {
     PaymentError(String),
     #[display(fmt = "Final cltv expiry delta {} is below the required minimum of {}", _0, _1)]
     CLTVExpiryError(u32, u32),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
 }
 
 impl HttpStatusCode for SendPaymentError {
@@ -349,7 +349,7 @@ impl HttpStatusCode for SendPaymentError {
             SendPaymentError::PaymentError(_)
             | SendPaymentError::NoRouteFound(_)
             | SendPaymentError::CLTVExpiryError(_, _)
-            | SendPaymentError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | SendPaymentError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -363,7 +363,7 @@ impl From<CoinFindError> for SendPaymentError {
 }
 
 impl From<SqlError> for SendPaymentError {
-    fn from(err: SqlError) -> SendPaymentError { SendPaymentError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> SendPaymentError { SendPaymentError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -373,8 +373,8 @@ pub enum ListPaymentsError {
     UnsupportedCoin(String),
     #[display(fmt = "No such coin {}", _0)]
     NoSuchCoin(String),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
 }
 
 impl HttpStatusCode for ListPaymentsError {
@@ -382,7 +382,7 @@ impl HttpStatusCode for ListPaymentsError {
         match self {
             ListPaymentsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             ListPaymentsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
-            ListPaymentsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ListPaymentsError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -396,7 +396,7 @@ impl From<CoinFindError> for ListPaymentsError {
 }
 
 impl From<SqlError> for ListPaymentsError {
-    fn from(err: SqlError) -> ListPaymentsError { ListPaymentsError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> ListPaymentsError { ListPaymentsError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -408,8 +408,8 @@ pub enum GetPaymentDetailsError {
     NoSuchCoin(String),
     #[display(fmt = "Payment with hash: {:?} is not found", _0)]
     NoSuchPayment(H256Json),
-    #[display(fmt = "SQL error {}", _0)]
-    SqlError(String),
+    #[display(fmt = "DB error {}", _0)]
+    DbError(String),
 }
 
 impl HttpStatusCode for GetPaymentDetailsError {
@@ -418,7 +418,7 @@ impl HttpStatusCode for GetPaymentDetailsError {
             GetPaymentDetailsError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
             GetPaymentDetailsError::NoSuchCoin(_) => StatusCode::PRECONDITION_REQUIRED,
             GetPaymentDetailsError::NoSuchPayment(_) => StatusCode::NOT_FOUND,
-            GetPaymentDetailsError::SqlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            GetPaymentDetailsError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -432,7 +432,7 @@ impl From<CoinFindError> for GetPaymentDetailsError {
 }
 
 impl From<SqlError> for GetPaymentDetailsError {
-    fn from(err: SqlError) -> GetPaymentDetailsError { GetPaymentDetailsError::SqlError(err.to_string()) }
+    fn from(err: SqlError) -> GetPaymentDetailsError { GetPaymentDetailsError::DbError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]

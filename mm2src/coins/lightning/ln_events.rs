@@ -58,7 +58,7 @@ impl EventHandler for LightningEventHandler {
 
             // Todo: an RPC for total amount earned
             Event::PaymentForwarded { fee_earned_msat, claim_from_onchain_tx } => log::info!(
-                "Recieved a fee of {} milli-satoshis for a successfully forwarded payment through our {} lightning node. Was the forwarded HTLC claimed by our counterparty via an on-chain transaction?: {}",
+                "Received a fee of {} milli-satoshis for a successfully forwarded payment through our {} lightning node. Was the forwarded HTLC claimed by our counterparty via an on-chain transaction?: {}",
                 fee_earned_msat.unwrap_or_default(),
                 self.platform.coin.ticker(),
                 claim_from_onchain_tx,
@@ -263,7 +263,7 @@ impl LightningEventHandler {
                     payment_info.amt_msat = Some(amt);
                     payment_info.last_updated = now_ms() / 1000;
                     if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
-                        log::error!("{}", e);
+                        log::error!("Unable to update payment information in DB: {}", e);
                     }
                 }
             }),
@@ -282,7 +282,7 @@ impl LightningEventHandler {
                 };
                 spawn(async move {
                     if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
-                        log::error!("{}", e);
+                        log::error!("Unable to update payment information in DB: {}", e);
                     }
                 });
             },
@@ -311,12 +311,8 @@ impl LightningEventHandler {
                 payment_info.fee_paid_msat = fee_paid_msat;
                 payment_info.last_updated = now_ms() / 1000;
                 let amt_msat = payment_info.amt_msat;
-                if let Err(e) = persister
-                    .add_or_update_payment_in_sql(payment_info)
-                    .await
-                    .error_log_passthrough()
-                {
-                    log::error!("{}", e);
+                if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
+                    log::error!("Unable to update payment information in DB: {}", e);
                 }
                 log::info!(
                     "Successfully sent payment of {} millisatoshis with payment hash {}",
@@ -403,7 +399,7 @@ impl LightningEventHandler {
                 payment_info.status = HTLCStatus::Failed;
                 payment_info.last_updated = now_ms() / 1000;
                 if let Err(e) = persister.add_or_update_payment_in_sql(payment_info).await {
-                    log::error!("{}", e);
+                    log::error!("Unable to update payment information in DB: {}", e);
                 }
             }
         });

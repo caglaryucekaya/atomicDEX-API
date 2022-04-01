@@ -58,7 +58,7 @@ pub async fn init_persister(
         ln_data_dir,
         ln_data_backup_dir,
         ctx.sqlite_connection
-            .ok_or(MmError::new(EnableLightningError::SqlError(
+            .ok_or(MmError::new(EnableLightningError::DbError(
                 "sqlite_connection is not initialized".into(),
             )))?
             .clone(),
