@@ -21,6 +21,7 @@ pub type ListPaymentsResult<T> = Result<T, MmError<ListPaymentsError>>;
 pub type GetPaymentDetailsResult<T> = Result<T, MmError<GetPaymentDetailsError>>;
 pub type CloseChannelResult<T> = Result<T, MmError<CloseChannelError>>;
 pub type ClaimableBalancesResult<T> = Result<T, MmError<ClaimableBalancesError>>;
+pub type SaveChannelClosingResult<T> = Result<T, MmError<SaveChannelClosingError>>;
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
@@ -488,4 +489,30 @@ impl From<CoinFindError> for ClaimableBalancesError {
             CoinFindError::NoSuchCoin { coin } => ClaimableBalancesError::NoSuchCoin(coin),
         }
     }
+}
+
+#[derive(Display)]
+pub enum SaveChannelClosingError {
+    #[display(fmt = "DB error: {}", _0)]
+    DbError(String),
+    #[display(fmt = "Channel with rpc id {} not found in DB", _0)]
+    ChannelNotFound(u64),
+    #[display(fmt = "Funding transaction hash is Null in DB")]
+    FundingTxNull,
+    #[display(fmt = "Error parsing funding transaction hash: {}", _0)]
+    FundingTxParseError(String),
+    #[display(fmt = "Error getting funding transaction bytes through RPC: {}", _0)]
+    RpcError(String),
+    #[display(fmt = "Error while waiting for the funding transaction to be spent: {}", _0)]
+    WaitForFundingTxSpendError(String),
+    #[display(fmt = "Wrong closing transaction type: {}", _0)]
+    WrongClosingTxType(String),
+}
+
+impl From<SqlError> for SaveChannelClosingError {
+    fn from(err: SqlError) -> SaveChannelClosingError { SaveChannelClosingError::DbError(err.to_string()) }
+}
+
+impl From<UtxoRpcError> for SaveChannelClosingError {
+    fn from(e: UtxoRpcError) -> Self { SaveChannelClosingError::RpcError(e.to_string()) }
 }

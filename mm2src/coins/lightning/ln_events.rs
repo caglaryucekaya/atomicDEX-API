@@ -1,4 +1,5 @@
 use super::*;
+use crate::lightning::ln_errors::{SaveChannelClosingError, SaveChannelClosingResult};
 use bitcoin::blockdata::script::Script;
 use bitcoin::blockdata::transaction::Transaction;
 use common::executor::{spawn, Timer};
@@ -160,6 +161,63 @@ fn sign_funding_transaction(
     )?;
 
     Transaction::try_from(signed).map_to_mm(|e| OpenChannelError::ConvertTxErr(e.to_string()))
+}
+
+async fn save_channel_closing_details(
+    persister: Arc<LightningPersister>,
+    platform: Arc<Platform>,
+    user_channel_id: u64,
+    reason: String,
+) -> SaveChannelClosingResult<()> {
+    persister.update_channel_to_closed(user_channel_id, reason).await?;
+
+    let channel_details = persister
+        .get_channel_from_sql(user_channel_id)
+        .await?
+        .ok_or_else(|| MmError::new(SaveChannelClosingError::ChannelNotFound(user_channel_id)))?;
+
+    let tx_id = channel_details
+        .funding_tx
+        .ok_or_else(|| MmError::new(SaveChannelClosingError::FundingTxNull))?;
+
+    let tx_hash =
+        H256Json::from_str(&tx_id).map_to_mm(|e| SaveChannelClosingError::FundingTxParseError(e.to_string()))?;
+
+    let funding_tx_bytes = platform
+        .coin
+        .as_ref()
+        .rpc_client
+        .get_transaction_bytes(&tx_hash)
+        .compat()
+        .await?;
+
+    let closing_tx_enum = platform
+        .coin
+        .wait_for_tx_spend(
+            &funding_tx_bytes.into_vec(),
+            (now_ms() / 1000) + 3600,
+            channel_details.funding_generated_in_block.unwrap_or_default(),
+            &None,
+        )
+        .compat()
+        .await
+        .map_to_mm(SaveChannelClosingError::WaitForFundingTxSpendError)?;
+
+    let closing_tx = match closing_tx_enum {
+        TransactionEnum::UtxoTx(tx) => tx,
+        e => {
+            return Err(MmError::new(SaveChannelClosingError::WrongClosingTxType(format!(
+                "{:?}",
+                e
+            ))))
+        },
+    };
+
+    persister
+        .add_closing_tx_to_sql(user_channel_id, closing_tx.hash().reversed().to_string())
+        .await?;
+
+    Ok(())
 }
 
 impl LightningEventHandler {
@@ -336,49 +394,8 @@ impl LightningEventHandler {
         // other than 0 in sql
         if user_channel_id != 0 {
             spawn(async move {
-                persister
-                    .update_channel_to_closed(user_channel_id, reason)
-                    .await
-                    .error_log();
-                if let Ok(Some(channel_details)) = persister
-                    .get_channel_from_sql(user_channel_id)
-                    .await
-                    .error_log_passthrough()
-                {
-                    if let Some(tx_id) = channel_details.funding_tx {
-                        if let Ok(tx_hash) = H256Json::from_str(&tx_id).error_log_passthrough() {
-                            if let Ok(funding_tx_bytes) = platform
-                                .coin
-                                .as_ref()
-                                .rpc_client
-                                .get_transaction_bytes(&tx_hash)
-                                .compat()
-                                .await
-                                .error_log_passthrough()
-                            {
-                                if let Ok(TransactionEnum::UtxoTx(closing_tx)) = platform
-                                    .coin
-                                    .wait_for_tx_spend(
-                                        &funding_tx_bytes.into_vec(),
-                                        (now_ms() / 1000) + 3600,
-                                        channel_details.funding_generated_in_block.unwrap_or_default(),
-                                        &None,
-                                    )
-                                    .compat()
-                                    .await
-                                    .error_log_passthrough()
-                                {
-                                    persister
-                                        .add_closing_tx_to_sql(
-                                            user_channel_id,
-                                            closing_tx.hash().reversed().to_string(),
-                                        )
-                                        .await
-                                        .error_log();
-                                }
-                            }
-                        }
-                    }
+                if let Err(e) = save_channel_closing_details(persister, platform, user_channel_id, reason).await {
+                    log::error!("Unable to update channel closing details in DB: {}", e);
                 }
             });
         }
