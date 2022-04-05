@@ -4,7 +4,8 @@ use crate::mm2::rpc::rate_limiter::{process_rate_limit, RateLimitContext};
 use crate::{mm2::lp_stats::{add_node_to_version_stat, remove_node_from_version_stat, start_version_stat_collection,
                             stop_version_stat_collection, update_version_stat_collection},
             mm2::lp_swap::trade_preimage_rpc,
-            mm2::rpc::get_public_key::get_public_key};
+            mm2::rpc::get_public_key::get_public_key,
+            mm2::rpc::signature::{sign_message, verify_message}};
 use coins::withdraw;
 use common::log::{error, warn};
 use common::mm_ctx::MmArc;
@@ -100,6 +101,8 @@ async fn dispatcher(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Respo
         "update_version_stat_collection" => handle_mmrpc(ctx, request, update_version_stat_collection).await,
         "trade_preimage" => handle_mmrpc(ctx, request, trade_preimage_rpc).await,
         "withdraw" => handle_mmrpc(ctx, request, withdraw).await,
+        "sign_message" => handle_mmrpc(ctx, request, sign_message).await,
+        "verify_message" => handle_mmrpc(ctx, request, verify_message).await,
         _ => MmError::err(DispatcherError::NoSuchMethod),
     }
 }
