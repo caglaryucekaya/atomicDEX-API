@@ -3,9 +3,10 @@ use crate::utxo::rpc_clients::UtxoRpcClientEnum;
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, UtxoTxBuilder};
 use crate::utxo::{sat_from_big_decimal, BlockchainNetwork, FeePolicy, UtxoCommonOps, UtxoTxGenerationOps};
 use crate::{BalanceFut, CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps, MmCoin,
-            NegotiateSwapContractAddrErr, SwapOps, TradeFee, TradePreimageFut, TradePreimageResult,
-            TradePreimageValue, TransactionEnum, TransactionFut, UnexpectedDerivationMethod, UtxoStandardCoin, 
-            ValidateAddressResult, ValidatePaymentInput, WithdrawError, WithdrawFut, WithdrawRequest};
+            NegotiateSwapContractAddrErr, SignatureResult, SwapOps, TradeFee, TradePreimageFut, TradePreimageResult,
+            TradePreimageValue, TransactionEnum, TransactionFut, UnexpectedDerivationMethod, UtxoStandardCoin,
+            ValidateAddressResult, ValidatePaymentInput, VerificationResult, WithdrawError, WithdrawFut,
+            WithdrawRequest};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use bitcoin::blockdata::script::Script;
@@ -375,9 +376,11 @@ impl MarketCoinOps for LightningCoin {
 
     fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
 
-    fn sign_message(&self, _message: &str) -> Result<String, String> { unimplemented!() }
+    fn sign_message(&self, _message: &str) -> SignatureResult<String> { unimplemented!() }
 
-    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> Result<bool, String> { unimplemented!() }
+    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> VerificationResult<bool> {
+        unimplemented!()
+    }
 
     fn my_balance(&self) -> BalanceFut<CoinBalance> {
         let decimals = self.decimals();

@@ -44,7 +44,6 @@ mod dispatcher_legacy;
 #[path = "rpc/get_public_key.rs"] mod get_public_key;
 #[path = "rpc/lp_commands.rs"] pub mod lp_commands;
 #[path = "rpc/rate_limiter.rs"] mod rate_limiter;
-#[path = "rpc/signature.rs"] mod signature;
 
 /// Lists the RPC method not requiring the "userpass" authentication.  
 /// None is also public to skip auth and display proper error in case of method is missing

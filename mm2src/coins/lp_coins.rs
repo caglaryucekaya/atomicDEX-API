@@ -167,6 +167,8 @@ pub type TradePreimageFut<T> = Box<dyn Future<Item = T, Error = MmError<TradePre
 pub type CoinFindResult<T> = Result<T, MmError<CoinFindError>>;
 pub type TxHistoryFut<T> = Box<dyn Future<Item = T, Error = MmError<TxHistoryError>> + Send>;
 pub type TxHistoryResult<T> = Result<T, MmError<TxHistoryError>>;
+pub type SignatureResult<T> = Result<T, MmError<SignatureError>>;
+pub type VerificationResult<T> = Result<T, MmError<VerificationError>>;
 
 #[derive(Debug, Display)]
 pub enum TxHistoryError {
@@ -401,9 +403,9 @@ pub trait MarketCoinOps {
 
     fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>>;
 
-    fn sign_message(&self, _message: &str) -> Result<String, String>;
+    fn sign_message(&self, _message: &str) -> SignatureResult<String>;
 
-    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> Result<bool, String>;
+    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> VerificationResult<bool>;
 
     fn get_non_zero_balance(&self) -> NonZeroBalanceFut<MmNumber> {
         let closure = |spendable: BigDecimal| {
@@ -558,6 +560,20 @@ pub struct GetStakingInfosRequest {
     pub coin: String,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct SignatureRequest {
+    coin: String,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VerificationRequest {
+    coin: String,
+    message: String,
+    signature: String,
+    address: String,
+}
+
 impl WithdrawRequest {
     pub fn new(
         coin: String,
@@ -602,6 +618,16 @@ impl From<QtumStakingInfosDetails> for StakingInfosDetails {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StakingInfos {
     pub staking_infos_details: StakingInfosDetails,
+}
+
+#[derive(Serialize)]
+pub struct SignatureResponse {
+    signature: String,
+}
+
+#[derive(Serialize)]
+pub struct VerificationResponse {
+    is_valid: bool,
 }
 
 /// Please note that no type should have the same structure as another type,
@@ -1348,6 +1374,58 @@ impl WithdrawError {
             GenerateTxError::Internal(e) => WithdrawError::InternalError(e),
         }
     }
+}
+
+#[derive(Serialize, Display, Debug, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum SignatureError {
+    #[display(fmt = "Invalid request: {}", _0)]
+    InvalidRequest(String),
+    #[display(fmt = "Internal error: {}", _0)]
+    InternalError(String),
+}
+
+impl HttpStatusCode for SignatureError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            SignatureError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            SignatureError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<keys::Error> for SignatureError {
+    fn from(e: keys::Error) -> Self { SignatureError::InternalError(e.to_string()) }
+}
+
+impl From<PrivKeyNotAllowed> for SignatureError {
+    fn from(e: PrivKeyNotAllowed) -> Self { SignatureError::InternalError(e.to_string()) }
+}
+
+#[derive(Serialize, Display, Debug, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum VerificationError {
+    #[display(fmt = "Invalid request: {}", _0)]
+    InvalidRequest(String),
+    #[display(fmt = "Internal error: {}", _0)]
+    InternalError(String),
+}
+
+impl HttpStatusCode for VerificationError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            VerificationError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            VerificationError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<base64::DecodeError> for VerificationError {
+    fn from(e: base64::DecodeError) -> Self { VerificationError::InternalError(e.to_string()) }
+}
+
+impl From<keys::Error> for VerificationError {
+    fn from(e: keys::Error) -> Self { VerificationError::InternalError(e.to_string()) }
 }
 
 /// NB: Implementations are expected to follow the pImpl idiom, providing cheap reference-counted cloning and garbage collection.
@@ -2181,6 +2259,31 @@ pub async fn validate_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>
 pub async fn withdraw(ctx: MmArc, req: WithdrawRequest) -> WithdrawResult {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await?;
     coin.withdraw(req).compat().await
+}
+
+pub async fn sign_message(ctx: MmArc, req: SignatureRequest) -> SignatureResult<SignatureResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin)
+        .await
+        .map_err(|_| SignatureError::InvalidRequest(String::from("No such coin")))?;
+    let signature = coin.sign_message(&req.message)?;
+    Ok(SignatureResponse { signature })
+}
+
+pub async fn verify_message(ctx: MmArc, req: VerificationRequest) -> VerificationResult<VerificationResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin)
+        .await
+        .map_err(|_| VerificationError::InvalidRequest(String::from("No such coin")))?;
+
+    let validate_address_result = coin.validate_address(&req.address);
+    if !validate_address_result.is_valid {
+        return MmError::err(VerificationError::InvalidRequest(
+            validate_address_result.reason.unwrap_or_else(|| "Unknown".to_string()),
+        ));
+    }
+
+    let is_valid = coin.verify_message(&req.signature, &req.message, &req.address)?;
+
+    Ok(VerificationResponse { is_valid })
 }
 
 pub async fn remove_delegation(ctx: MmArc, req: RemoveDelegateRequest) -> DelegationResult {

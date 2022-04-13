@@ -6,8 +6,8 @@ use crate::utxo::slp::{parse_slp_script, ParseSlpScriptError, SlpGenesisParams, 
 use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilder};
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
 use crate::{BlockHeightAndTime, CanRefundHtlc, CoinBalance, CoinProtocol, NegotiateSwapContractAddrErr,
-            PrivKeyBuildPolicy, SwapOps, TradePreimageValue, TransactionType, TxFeeDetails, UnexpectedDerivationMethod, 
-            ValidateAddressResult, ValidatePaymentInput, WithdrawFut};
+            PrivKeyBuildPolicy, SignatureResult, SwapOps, TradePreimageValue, TransactionType, TxFeeDetails,
+            UnexpectedDerivationMethod, ValidateAddressResult, ValidatePaymentInput, VerificationResult, WithdrawFut};
 use common::log::warn;
 use common::mm_metrics::MetricsArc;
 use common::mm_number::MmNumber;
@@ -1041,9 +1041,11 @@ impl MarketCoinOps for BchCoin {
 
     fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
 
-    fn sign_message(&self, _message: &str) -> Result<String, String> { unimplemented!() }
+    fn sign_message(&self, _message: &str) -> SignatureResult<String> { unimplemented!() }
 
-    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> Result<bool, String> { unimplemented!() }
+    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> VerificationResult<bool> {
+        unimplemented!()
+    }
 
     fn my_balance(&self) -> BalanceFut<CoinBalance> {
         let coin = self.clone();

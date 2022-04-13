@@ -1,7 +1,7 @@
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee, TransactionEnum, TransactionFut};
-use crate::{BalanceFut, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, TradePreimageFut,
-            TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod, ValidateAddressResult, ValidatePaymentInput, 
-            WithdrawFut, WithdrawRequest};
+use crate::{BalanceFut, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, SignatureResult,
+            TradePreimageFut, TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod,
+            ValidateAddressResult, ValidatePaymentInput, VerificationResult, WithdrawFut, WithdrawRequest};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use common::mm_ctx::MmArc;
@@ -37,9 +37,11 @@ impl MarketCoinOps for TestCoin {
 
     fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
 
-    fn sign_message(&self, _message: &str) -> Result<String, String> { unimplemented!() }
+    fn sign_message(&self, _message: &str) -> SignatureResult<String> { unimplemented!() }
 
-    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> Result<bool, String> { unimplemented!() }
+    fn verify_message(&self, _signature: &str, _message: &str, _address: &str) -> VerificationResult<bool> {
+        unimplemented!()
+    }
 
     fn my_balance(&self) -> BalanceFut<CoinBalance> { unimplemented!() }
 
